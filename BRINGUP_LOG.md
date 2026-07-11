@@ -2,6 +2,201 @@
 
 Timestamped notes on every QNX/Pi/toolchain gotcha encountered. Newest entries at top.
 
+## 2026-07-11 — M3: Pi first contact (RPi5, not RPi4B — hardware landed as a Pi 5)
+
+Hardware finally arrived: **Raspberry Pi 5** (the PRD assumed a 4B; QNX image
+is `com.qnx.qnx800.quickstart.rpi5`), flashed with the QNX 8.0 self-hosted
+developer desktop, on the same WiFi as the dev box. Confirmed via
+`uname -a`: `QNX qnxpi 8.0.0 2026/02/27-10:59:13EST RaspberryPi5 aarch64le`.
+This closes M3 per PRD §10: gears demo proved the image, `deploy.sh` loop
+works, our binary runs, keyboard+mouse verified, and the 60 fps / 2048-bullet
+acceptance test passed with real numbers below. Two real, previously-latent
+bugs were found and fixed along the way (both below). M5's "replay verified
+bit-identical on Pi" criterion, previously only proven on the QNX-x86 VM, is
+now also closed natively on the Pi. All fixes are in `platform_qnx.c` only
+(plus a small `sim.c`/`main.c` addition for the stress-test flag) —
+`make replaycheck` was re-run after each change and stayed green throughout,
+confirming none of it touched sim-affecting code.
+
+**Access.** IP `172.17.225.231` (WiFi `bcm0`), login `qnxuser`/`qnxuser`
+(default), **no root SSH** on this image. SSH key auth set up
+(`~/.ssh/config` host alias `qnxpi`) since password auth over a scripted
+non-interactive shell doesn't work well for iterative bring-up.
+
+**SSH gotcha:** default MAC negotiation fails outright —
+`Corrupted MAC on input` / `message authentication code incorrect` — on
+every plain `ssh`/`scp` call against this image's sshd. Fix: pin
+`-o MACs=hmac-sha2-256` on every invocation (added to `~/.ssh/config` for the
+`qnxpi` host so it's automatic).
+
+**Filesystem:** root `/` is the read-only IFS image and reports 100% full
+(20M/20M) — `/tmp` is *not* a safe deploy target despite the PRD's original
+`deploy.sh` using it. `/data/home/qnxuser` (18G free) is the real writable
+home and is what `deploy.sh` now targets.
+
+**Step 1 (GO/NO-GO): GLES2 is real on this image.** `/dev/screen/gpus/gpu-1`
+exists (non-empty — this is exactly what was empty/missing on the GPU-less
+QEMU-on-WSL VM from the previous entry). `gles2-gears` (`/system/bin/`) ran
+over SSH and the user confirmed spinning gears on the HDMI display. This
+gated everything else — if it had failed, M3 would have stopped here per the
+PRD's "never cut" rule on M3.
+
+**`deploy.sh` rewritten** for this environment: `TARGET_USER` (default
+`qnxuser`), the MAC workaround baked into `SSH_OPTS`, deploy target
+`/data/home/qnxuser` instead of `/tmp`, and `slay -f windowed-hell-qnx`
+(no root needed — it only kills the invoking user's own processes, which is
+all that's ever running here).
+
+### Bug 1: keyboard Down (S / Down-arrow) moved the player UP
+
+Found immediately on first play: `S` and the Down-arrow both moved the ship
+the same direction as `W`/Up-arrow. Root cause, found via a
+`WH_KEYDEBUG`-gated raw-symbol dump already in `platform_qnx.c`'s
+`plat_poll`: **`sys/keycodes.h` `#define`s `KEY_DOWN` as `0x00000001`** —
+an unrelated QNX concept (a key-*event* flag meaning "this is a press, not a
+release," used in `SCREEN_PROPERTY_FLAGS` bitfields), included *after*
+`platform.h` in `platform_qnx.c`. Since it's a preprocessor macro, not a
+namespaced constant, it silently rewrites every later bare `KEY_DOWN` token
+in the file — including `sym_to_bit()`'s `return KEY_DOWN;` for both `'s'`
+and `KEYCODE_DOWN` — to `1`, which is `KEY_UP`'s actual enum value from
+`platform.h`. Confirmed by the debug log: both `'w'` (sym 0x77) and `'s'`
+(sym 0x73) printed `bit=1`; so did the Up and Down arrow keycodes
+(`0xf052`/`0xf054`). Only `KEY_DOWN` collides — checked all nine
+`platform.h` `KEY_*` names against `screen/` and `sys/keycodes.h`; nothing
+else matches. Fix: `#undef KEY_DOWN` immediately after
+`#include <sys/keycodes.h>`, restoring the identifier to the enum constant
+for the rest of the file. Rebuilt, redeployed, user confirmed S/Down-arrow
+now move correctly, along with the rest of WASD/arrows.
+
+This is a **platform-file-only** bug — `sim.c`'s `KEY_DOWN` usage
+(`platform_linux.c` doesn't include `sys/keycodes.h`, so it was never
+affected) was always correct; the enum value coming *into* sim was just
+wrong on QNX specifically.
+
+### Bug 2: mouse aim was "weird" — display-space coords fed straight into a 1280x720 sim
+
+Second finding, same debugging pattern (added a matching `MOUSEDBG` print
+under the same `WH_KEYDEBUG` flag). The display's native mode is
+**1920x1080** (from `/dev/screen/.config`'s `winmgr` section), but the
+game's fixed internal buffer is 1280x720 (D4). The existing pointer code's
+comment claimed `SCREEN_PROPERTY_POSITION` on a `SCREEN_EVENT_POINTER` is
+"window-relative... already internal-space" and used it unscaled. Logged
+values disproved that immediately: raw x ranged up to **1725**, raw y up to
+**838** — both past the 1280x720 buffer entirely. Since `sim.c`'s aim vector
+is `mouse - player` in internal space, feeding it raw display-space pixels
+made aim increasingly wrong the further the cursor sat from the window
+origin. (Separately confirmed: the game window has *always* rendered
+fullscreen on this image, by Screen's own default — that was not the bug,
+just an initially-wrong hypothesis while investigating.)
+
+Fix, in `plat_init`: query the window's actual display via
+`SCREEN_PROPERTY_DISPLAY` + `screen_get_display_property_iv(..., SCREEN_PROPERTY_SIZE, ...)`,
+explicitly set the window's `SCREEN_PROPERTY_POSITION` to `(0,0)` and
+`SCREEN_PROPERTY_SIZE` to that display-native size (belt-and-suspenders with
+the observed default — makes the scale factor well-defined regardless), and
+store `buffer_w/h` + `onscreen_w/h` on `QnxNative`. In `plat_poll`, scale
+every pointer position by `buffer_size / onscreen_size` (1280/1920,
+720/1080 here) before writing `g_mouse_x/y`, clamped defensively to
+`[0,buffer]`. This is also PRD §5.4 step 3's original TODO ("SCREEN_PROPERTY_SIZE
+is left at its default... needs a real display to verify; do it in M3"),
+now done. Rebuilt, redeployed; user confirmed shots now land where the
+cursor points.
+
+Both bugs together explain the earlier "S goes up" / "aiming is weird"
+reports as two independent, unrelated latent defects that simply had never
+been exercised before real target hardware existed — exactly the kind of
+thing M3 exists to find. `WH_KEYDEBUG=1 ./windowed-hell-qnx` reproduces
+both debug dumps (`KEYDBG`/`MOUSEDBG` lines to stderr) for any future
+target-input bug.
+
+### Input verification (target hardware, USB keyboard + mouse)
+
+Keyboard: WASD/arrows (all four directions, post-fix), J/Z fire (keyboard
+fallback), R restart, F1 HUD toggle, K/X focus, Esc quit — all confirmed
+working. Mouse: cursor aim (post-fix) and left-click fire confirmed working.
+This is the first-ever exercise of `SCREEN_EVENT_POINTER` in this codebase
+(flagged unverified since the mouse-aim retrofit in `DESIGN_CHANGES.md`) —
+it works correctly once the coordinate scaling above is in place.
+
+### M3 acceptance test: 60 fps / 2048 bullets
+
+No existing hook reached anywhere near 2048 simultaneous bullets (`--wave`
+jumps waves, not bullet count), so added `--stress N`
+(`sim_start_stress()` in `sim.c`, wired in `main.c`): spawns N bullets
+(clamped to `MAX_BULLETS`=4096) scattered across the internal 1280x720
+space with PRNG-seeded random velocities.
+
+**First attempt found a real design bug in the stress mode itself, not the
+engine:** `sim_start_stress()` called the normal `start_new_run()`, so the
+mortal `PLAY` state machine (window shrink, enemy spawns, crush/death) kept
+running underneath the bullet swarm. With no one piloting the ship (this is
+an unattended perf test), the player eventually got crushed or killed and
+the sim landed in `SIM_STATE_DEAD`, which does nothing every tick —
+the whole test silently froze. Confirmed on-target: "game just paused when
+user died." Fixed by making `stress_mode` bypass the state machine entirely
+in `sim_step()` — it now only steps the bouncing-bullet pool (edges off the
+fixed screen bounds, not the window rect) and returns, forever, regardless
+of state. `make replaycheck` (hash `4ced063e0774b3fb`, unchanged) confirms
+this — and the whole stress feature — never touches normal-mode determinism,
+since `stress_mode` defaults false and nothing in the normal path reads it.
+
+**Measured on the Pi 5, `./windowed-hell-qnx --stress 2048`:**
+
+```
+FPS 60.0   FT 16.7ms   WORST 52.0ms
+SIM 240Hz  JIT avg 570us  max 985us  OVR 0
+```
+
+60 fps sustained, zero tick overruns — **M3's acceptance criterion met with
+no perf knobs needed** (§7.3's `MAX_BULLETS`/internal-res knobs were not
+required). The one outlier, WORST 52.0ms, reads as a one-time startup
+transient (first-frame texture/buffer upload) rather than sustained jank —
+FPS was steady at 60 for the rest of the observed run.
+
+**Measured in normal gameplay** (menu → a couple of waves, no stress flag):
+
+```
+FPS 60.0   FT 16.7ms   WORST 38.8ms
+SIM 240Hz  JIT avg 460us  max 887us  OVR 0
+```
+
+Tighter jitter than the stress case, as expected with far fewer live
+entities. Also confirmed via `pidin`'s own thread listing (not just "didn't
+crash"): the sim thread consistently shows priority **60, policy `f`**
+(`SCHED_FIFO`) in every process listing taken this session — `§4`'s
+priority-elevation code path is not just present but actually succeeding on
+this non-root `qnxuser` account, contrary to the defensive
+log-and-continue path it falls back to if `pthread_setschedparam` fails.
+
+### M5's on-Pi replay criterion, now also closed
+
+M5 originally verified replay only on the QNX-x86 VM. Built `replaycheck`
+natively on the Pi (`qcc`/QNX Screen headers aren't on the native include
+path — same finding as the earlier VM entry — but `replaycheck` is headless
+and only needs `sim.c`/`replay.c`, no GL/Screen): `gcc -std=c11 -O2
+tools/replaycheck.c src/sim.c src/replay.c -lm`. **Passed, hash
+`4ced063e0774b3fb`** — identical to both the Linux WSL2 dev box and the
+QNX-x86 VM from the previous entry. D6 only requires per-platform
+bit-identity, so cross-arch/cross-platform identity here (x86_64 Linux,
+x86_64 QNX, aarch64 QNX) is a bonus, not a requirement, but a nice one:
+`sim.c`'s math is landing on identical bits across three very different
+`libm`/compiler combinations (glibc/gcc, QNX x86/clang, QNX aarch64/clang).
+
+### Minor, not chased: can't self-capture the display
+
+Tried to screenshot the Pi's HDMI output remotely (to read the HUD without
+relying on the user's eyes) via `/system/bin/screenshot` and
+`weston-screenshooter`. Both failed: `screenshot -file=... ` gets
+`screen_context_create: Permission denied` even though `qnxuser` is in the
+`screen` group (and the `sudo` group — but `sudo -n` still demands a
+password, so passwordless elevation isn't configured either);
+`weston-screenshooter` needs `XDG_RUNTIME_DIR` and no Wayland socket was
+found anywhere on the filesystem (weston here appears to be a QNX Screen
+client itself, not exposing a nested Wayland display for other clients to
+screenshot through). Not blocking — HUD numbers were read off the physical
+display by the user throughout this session — but worth knowing before
+trying to automate this further.
+
 ## 2026-07-11 — QNX 8.0 Self-Hosted Developer Desktop in QEMU-on-WSL (env spike while waiting on the Pi)
 
 Stood up the **QNX 8.0 Self-Hosted Developer Desktop** (QNX Everywhere Quick

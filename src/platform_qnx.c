@@ -1,9 +1,6 @@
 // platform_qnx.c — QNX Screen + EGL implementation of platform.h.
-// Follows QNX Screen Developer's Guide patterns (PRD §5.4). Compiles clean
-// against SDP 8.0 headers for aarch64le and x86_64; not yet run on target.
-// TODO(bringup): SCREEN_PROPERTY_SIZE is left at its default — PRD §5.4 step 3
-// wants it set to the display's native mode so Screen hardware-scales the
-// fixed 1280x720 buffer. Needs a real display to verify; do it in M3.
+// Follows QNX Screen Developer's Guide patterns (PRD §5.4). Verified on
+// target (RPi5, QNX 8.0 quickstart desktop image) as of M3.
 #define _POSIX_C_SOURCE 200809L
 #include "platform.h"
 
@@ -15,6 +12,13 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/keycodes.h>
+// sys/keycodes.h #defines KEY_DOWN as 0x00000001 ("key was pressed", a flag
+// for its own event-flags bitfield) — an unrelated meaning that collides
+// with platform.h's KEY_DOWN enum constant (our "move down" input bit,
+// value 2). Being a macro, it silently rewrites every later `KEY_DOWN` in
+// this file to 1 (== KEY_UP's value), which is why S/Down-arrow moved the
+// player up instead of down. undef it here to restore the enum constant.
+#undef KEY_DOWN
 
 typedef struct {
     screen_context_t    ctx;
@@ -23,6 +27,8 @@ typedef struct {
     EGLDisplay           egl_dpy;
     EGLSurface           egl_surf;
     EGLContext           egl_ctx;
+    int                  buffer_w, buffer_h;   // fixed internal resolution (D4)
+    int                  onscreen_w, onscreen_h; // window's actual on-screen size (display-native)
 } QnxNative;
 
 static uint32_t g_held_keys = 0;
@@ -75,10 +81,52 @@ bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
     // D4: fixed internal buffer size (1280x720); Screen hardware-scales to display.
     int buffer_size[2] = { desired_w, desired_h };
     screen_set_window_property_iv(n->win, SCREEN_PROPERTY_BUFFER_SIZE, buffer_size);
+    n->buffer_w = desired_w;
+    n->buffer_h = desired_h;
+
+    // PRD §5.4 step 3: size the window to the display's native mode so Screen
+    // hardware-scales the fixed 1280x720 buffer up to fill it. M3 finding
+    // (RPi5 hardware): the window already renders fullscreen by Screen's own
+    // default (visually confirmed on target) — but SCREEN_EVENT_POINTER still
+    // reports positions in on-screen/display pixels (1920x1080), not the
+    // internal 1280x720 buffer space sim.c expects. Left unhandled, raw coords
+    // ran up to (1725,838), well past internal bounds, corrupting the aim
+    // vector (mouse - player). Explicitly setting position=(0,0) and
+    // size=display-native makes that scale factor well-defined regardless of
+    // whatever Screen's default placement actually is (window covers the
+    // whole display at the origin either way, so no separate offset term is
+    // needed) — belt-and-suspenders with the observed default, not a fix to
+    // a visible placement bug.
+    screen_display_t disp = NULL;
+    if (screen_get_window_property_pv(n->win, SCREEN_PROPERTY_DISPLAY, (void**)&disp) == 0 && disp) {
+        int display_size[2] = { desired_w, desired_h };
+        if (screen_get_display_property_iv(disp, SCREEN_PROPERTY_SIZE, display_size) == 0) {
+            int win_pos[2] = { 0, 0 };
+            screen_set_window_property_iv(n->win, SCREEN_PROPERTY_POSITION, win_pos);
+            screen_set_window_property_iv(n->win, SCREEN_PROPERTY_SIZE, display_size);
+            n->onscreen_w = display_size[0];
+            n->onscreen_h = display_size[1];
+        }
+    }
+    if (n->onscreen_w <= 0 || n->onscreen_h <= 0) {
+        // No display/property support (or query failed): fall back to
+        // window size == buffer size, 1:1 scaling, matches old behavior.
+        n->onscreen_w = desired_w;
+        n->onscreen_h = desired_h;
+    }
 
     if (screen_create_window_buffers(n->win, 2) != 0) {
         fprintf(stderr, "plat_init: screen_create_window_buffers failed\n");
         return false;
+    }
+
+    if (getenv("WH_KEYDEBUG")) {
+        int win_size[2] = { 0, 0 };
+        screen_get_window_property_iv(n->win, SCREEN_PROPERTY_SIZE, win_size);
+        fprintf(stderr, "plat_init: buffer_size=%dx%d onscreen(requested)=%dx%d "
+                        "window_size(SCREEN_PROPERTY_SIZE, actual)=%dx%d\n",
+                buffer_size[0], buffer_size[1], n->onscreen_w, n->onscreen_h,
+                win_size[0], win_size[1]);
     }
 
     n->egl_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -173,23 +221,29 @@ void plat_poll(PlatformWindow* w, PlatformInput* out) {
             else g_held_keys &= ~bit;
             if (sym == KEYCODE_ESCAPE && (flags & SCREEN_FLAG_KEY_DOWN)) g_quit = true;
         } else if (type == SCREEN_EVENT_POINTER) {
-            // TODO(bringup): never exercised on target — no QNX mouse precedent
-            // in this codebase. Symbols verified against SDP 8.0 screen.h, but
-            // behavior is unverified. KEY_SHOOT (J/Z) stays wired as the
-            // fallback path precisely because of this. Test with a USB mouse
-            // during the M3 first-hour spike, alongside the keyboard check
-            // (PRD §5.4 step 7).
+            // M3 finding (RPi5 hardware): SCREEN_PROPERTY_POSITION on this
+            // image reports coordinates in on-screen/display pixels, not
+            // internal-buffer pixels — measured running up to (1725,838) on
+            // a 1920x1080 display against a nominally 1280x720 window/buffer.
+            // Scale by buffer/onscreen (plat_init sizes+positions the window
+            // to exactly cover the display at (0,0), so no offset term is
+            // needed — see the plat_init comment) and clamp defensively.
             int pos[2] = { 0, 0 };
             int buttons = 0;
-            // For pointer events SCREEN_PROPERTY_POSITION is the window-relative
-            // contact point; SOURCE_POSITION would be display-absolute.
             screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_POSITION, pos);
             screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_BUTTONS, &buttons);
-            // Window buffer is fixed at the internal resolution (D4), so
-            // window-relative coords are already internal-space.
-            g_mouse_x = (float)pos[0];
-            g_mouse_y = (float)pos[1];
+            float sx = (float)pos[0] * ((float)n->buffer_w / (float)n->onscreen_w);
+            float sy = (float)pos[1] * ((float)n->buffer_h / (float)n->onscreen_h);
+            if (sx < 0.0f) sx = 0.0f;
+            if (sx > (float)n->buffer_w) sx = (float)n->buffer_w;
+            if (sy < 0.0f) sy = 0.0f;
+            if (sy > (float)n->buffer_h) sy = (float)n->buffer_h;
+            g_mouse_x = sx;
+            g_mouse_y = sy;
             g_mouse_down = (buttons & SCREEN_LEFT_MOUSE_BUTTON) != 0;
+            if (getenv("WH_KEYDEBUG"))
+                fprintf(stderr, "MOUSEDBG raw=(%d,%d) scaled=(%.1f,%.1f) buttons=0x%x down=%d\n",
+                        pos[0], pos[1], sx, sy, buttons, g_mouse_down);
         }
     }
     out->keys = g_held_keys;

@@ -244,6 +244,12 @@ typedef struct {
     bool       prev_mouse_down;  // ditto, for click edge detection
 
     uint8_t state;  // SIM_STATE_*
+    // M3 acceptance-test aid (PRD §10, "60 fps with 2048 test bullets
+    // bouncing"): when set, step_bullets() bounces off the fixed screen
+    // bounds instead of despawning outside the window, giving a sustained,
+    // gameplay-independent entity-count load. Not reachable from normal
+    // input; see sim_start_stress().
+    bool stress_mode;
 
     WindowEdge edges[4];       // indexed by EDGE_*
     float      edge_flash[4];  // decays ~2 ticks after a push
@@ -310,6 +316,12 @@ void sim_init(Sim* sim, uint64_t seed);
 // Spiker fights, so this is how you rehearse the boss without clearing four
 // waves first. Not reachable from normal input.
 void sim_start_at_wave(Sim* sim, int wave);
+// Dev/demo aid (M3 acceptance test, PRD §10): starts a normal run, then
+// overrides the bullet pool with n bullets scattered across the internal
+// resolution with random velocities, bouncing off the screen bounds forever
+// (see stress_mode). n is clamped to MAX_BULLETS. Not reachable from normal
+// input.
+void sim_start_stress(Sim* sim, int n);
 void sim_consume_input(Sim* sim, InputRing* ring);
 void sim_step(Sim* sim);
 void sim_publish(const Sim* sim, SnapshotBuffer* sb);

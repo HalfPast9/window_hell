@@ -122,6 +122,7 @@ int main(int argc, char** argv) {
     uint64_t seed = 0;
     const char* replay_path = NULL;
     int start_wave = 0;  // 0 = normal (start at the menu)
+    int stress_n = 0;    // 0 = disabled; see PRD §10 M3 acceptance test
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -130,6 +131,8 @@ int main(int argc, char** argv) {
             replay_path = argv[++i];
         } else if (strcmp(argv[i], "--wave") == 0 && i + 1 < argc) {
             start_wave = atoi(argv[++i]);  // dev/demo: jump to a wave (5, 10, ... = boss)
+        } else if (strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
+            stress_n = atoi(argv[++i]);  // dev/demo: N bouncing bullets, perf stress test
         }
     }
     signal(SIGINT, handle_sigint);
@@ -154,6 +157,9 @@ int main(int argc, char** argv) {
         sim_start_at_wave(&sim, start_wave);
         printf("main: starting at wave %d%s\n", start_wave,
                 (start_wave % 5 == 0) ? " (Spiker)" : "");
+    } else if (stress_n > 0) {
+        sim_start_stress(&sim, stress_n);
+        printf("main: stress mode, %d bouncing bullets\n", stress_n);
     }
 
     InputRing input_ring;

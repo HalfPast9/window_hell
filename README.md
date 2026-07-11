@@ -10,8 +10,10 @@ QNX engineers judging it.
 
 > Window mechanic inspired by **Windowkill** (torcado) — see Credits below.
 
-*Status: environment / scaffolding stage (PRD milestone M0). Sections below
-will fill in as milestones land; see `BRINGUP_LOG.md` for live notes.*
+*Status: M0–M3 complete (M3 — Pi first contact — verified on real Raspberry
+Pi 5 hardware). M4/M5 content (enemies, waves, upgrades, Spiker boss, replay)
+is also built and verified; see `BRINGUP_LOG.md` for full milestone history
+and live bring-up notes.*
 
 ## Architecture
 
@@ -45,8 +47,11 @@ logic never touches an OS or windowing header.
   (EWMA)/max-since-reset plus a 16-bucket histogram, shown live on the HUD.
 - **Overrun policy:** if a tick runs long, it is executed late and counted —
   sim steps are never silently skipped.
-- Pi jitter numbers: *TBD — recorded in `BRINGUP_LOG.md` once M3 (Pi first
-  contact) lands.*
+- **Pi jitter numbers** (Raspberry Pi 5, QNX 8.0, M3 measurements — see
+  `BRINGUP_LOG.md` for full detail):
+  - Normal gameplay: `FPS 60.0  FT 16.7ms  WORST 38.8ms  JIT avg 460us max 887us  OVR 0`
+  - Stress test (`--stress 2048`, 2048 bouncing bullets): `FPS 60.0  FT 16.7ms  WORST 52.0ms  JIT avg 570us max 985us  OVR 0`
+  - Sim thread confirmed running `SCHED_FIFO` priority 60 on-target (via `pidin`).
 
 ## Determinism & replay
 
@@ -91,12 +96,12 @@ make linux
 ./bin/windowed-hell-linux
 ```
 
-### QNX (Raspberry Pi 4B target)
+### QNX (Raspberry Pi target — a Pi 5 in practice; the PRD assumed a 4B)
 
 ```sh
 source $QNX_SDP_INSTALL_DIR/qnxsdp-env.sh
 make qnx
-TARGET_IP=<pi-ip> ./deploy.sh
+TARGET_IP=<pi-ip> ./deploy.sh   # ssh/scp as qnxuser, no root; see BRINGUP_LOG.md
 ```
 
 `make qnx-x86` builds for the QNX x86_64 VM (bring-up smoke test before Pi

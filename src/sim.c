@@ -698,6 +698,17 @@ static void step_bullets(Sim* sim) {
         b->y += b->vy * SIM_DT;
         if (b->age_ticks < 255) b->age_ticks++;
 
+        if (sim->stress_mode) {
+            // Bounce off the fixed screen bounds instead of the window edges:
+            // a stable, gameplay-independent load for the M3 perf test.
+            if (b->x < 0.0f)       { b->x = 0.0f;       b->vx = -b->vx; }
+            if (b->x > INTERNAL_W) { b->x = INTERNAL_W; b->vx = -b->vx; }
+            if (b->y < 0.0f)       { b->y = 0.0f;       b->vy = -b->vy; }
+            if (b->y > INTERNAL_H) { b->y = INTERNAL_H; b->vy = -b->vy; }
+            i++;
+            continue;
+        }
+
         bool in_player_win = b->x >= left && b->x <= right && b->y >= top && b->y <= bottom;
         if (!in_player_win && !point_in_boss_window(sim, b->x, b->y)) {
             sim->bullets[i] = sim->bullets[sim->bullet_count - 1];
@@ -1130,6 +1141,24 @@ void sim_start_at_wave(Sim* sim, int wave) {
     begin_wave(sim, wave);
 }
 
+void sim_start_stress(Sim* sim, int n) {
+    start_new_run(sim);
+    sim->stress_mode = true;
+    if (n < 0) n = 0;
+    if (n > MAX_BULLETS) n = MAX_BULLETS;
+    for (int i = 0; i < n; i++) {
+        Bullet* b = &sim->bullets[i];
+        float angle = rng_float01(&sim->rng) * SIM_TAU;
+        float speed = 200.0f + rng_float01(&sim->rng) * 200.0f;  // 200-400 px/s
+        b->x = rng_float01(&sim->rng) * INTERNAL_W;
+        b->y = rng_float01(&sim->rng) * INTERNAL_H;
+        b->vx = cosf(angle) * speed;
+        b->vy = sinf(angle) * speed;
+        b->age_ticks = 255;  // fully spawned-in already, skip the pop animation
+    }
+    sim->bullet_count = (uint16_t)n;
+}
+
 void sim_consume_input(Sim* sim, InputRing* ring) {
     InputFrame f;
     while (input_ring_pop(ring, &f)) {
@@ -1156,6 +1185,19 @@ void sim_step(Sim* sim) {
     sim->tick++;
     uint32_t keys = sim->input.keys;
     uint32_t prev = sim->prev_keys;
+
+    if (sim->stress_mode) {
+        // Bypass the mortal PLAY state machine entirely: the M3 perf test
+        // runs unattended (no one piloting the ship), so leaving window
+        // shrink/enemies/crush live means it eventually gets crushed or
+        // killed and freezes at SIM_STATE_DEAD — exactly what happened the
+        // first time this ran on target. Pure bullet-bounce load instead,
+        // runs indefinitely regardless of state.
+        step_bullets(sim);
+        sim->prev_keys = keys;
+        sim->prev_mouse_down = sim->input.mouse_down;
+        return;
+    }
 
     bool restart_pressed = (keys & KEY_RESTART) && !(prev & KEY_RESTART);
 

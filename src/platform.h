@@ -11,7 +11,9 @@ typedef struct {
 } PlatformWindow;
 
 typedef struct {
-    uint32_t keys;              // bitmask: see KEY_* below
+    uint32_t keys;               // bitmask: see KEY_* below
+    float    mouse_x, mouse_y;   // cursor position, already converted to internal 1280x720 space
+    bool     mouse_down;         // primary button (aim/shoot)
     bool     quit_requested;
 } PlatformInput;
 

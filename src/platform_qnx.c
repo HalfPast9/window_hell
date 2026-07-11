@@ -1,8 +1,9 @@
 // platform_qnx.c — QNX Screen + EGL implementation of platform.h.
-// Follows QNX Screen Developer's Guide patterns (PRD §5.4). Not yet
-// compiled/tested — no QNX SDP toolchain on the dev box as of this writing.
-// TODO(bringup): verify against real SDP 8.0 headers; log deviations to
-// BRINGUP_LOG.md as soon as qcc is available.
+// Follows QNX Screen Developer's Guide patterns (PRD §5.4). Compiles clean
+// against SDP 8.0 headers for aarch64le and x86_64; not yet run on target.
+// TODO(bringup): SCREEN_PROPERTY_SIZE is left at its default — PRD §5.4 step 3
+// wants it set to the display's native mode so Screen hardware-scales the
+// fixed 1280x720 buffer. Needs a real display to verify; do it in M3.
 #define _POSIX_C_SOURCE 200809L
 #include "platform.h"
 
@@ -18,6 +19,7 @@
 typedef struct {
     screen_context_t    ctx;
     screen_window_t     win;
+    screen_event_t      ev;     // reused across polls; Screen requires it be created
     EGLDisplay           egl_dpy;
     EGLSurface           egl_surf;
     EGLContext           egl_ctx;
@@ -25,6 +27,8 @@ typedef struct {
 
 static uint32_t g_held_keys = 0;
 static bool     g_quit = false;
+static float    g_mouse_x = 0.0f, g_mouse_y = 0.0f;
+static bool     g_mouse_down = false;
 
 static uint32_t sym_to_bit(int sym) {
     switch (sym) {
@@ -49,6 +53,11 @@ bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
     if (screen_create_context(&n->ctx, SCREEN_APPLICATION_CONTEXT) != 0) {
         fprintf(stderr, "plat_init: screen_create_context failed\n");
         free(n);
+        return false;
+    }
+
+    if (screen_create_event(&n->ev) != 0) {
+        fprintf(stderr, "plat_init: screen_create_event failed\n");
         return false;
     }
 
@@ -115,6 +124,12 @@ bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
         return false;
     }
 
+    // Seed the cursor at center so aim is well-defined before the first
+    // pointer event arrives (and stays sane if none ever does — see the
+    // unverified-pointer note in plat_poll).
+    g_mouse_x = (float)desired_w * 0.5f;
+    g_mouse_y = (float)desired_h * 0.5f;
+
     w->width  = desired_w;
     w->height = desired_h;
     w->native = n;
@@ -131,6 +146,7 @@ void plat_shutdown(PlatformWindow* w) {
         eglTerminate(n->egl_dpy);
     }
     if (n->win) screen_destroy_window(n->win);
+    if (n->ev)  screen_destroy_event(n->ev);
     if (n->ctx) screen_destroy_context(n->ctx);
     free(n);
     w->native = NULL;
@@ -138,25 +154,48 @@ void plat_shutdown(PlatformWindow* w) {
 
 void plat_poll(PlatformWindow* w, PlatformInput* out) {
     QnxNative* n = (QnxNative*)w->native;
-    screen_event_t ev;
     for (;;) {
-        if (screen_get_event(n->ctx, ev, 0) != 0) break; // 0 timeout: non-blocking
+        if (screen_get_event(n->ctx, n->ev, 0) != 0) break; // 0 timeout: non-blocking
 
         int type = SCREEN_EVENT_NONE;
-        screen_get_event_property_iv(ev, SCREEN_PROPERTY_TYPE, &type);
+        screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_TYPE, &type);
         if (type == SCREEN_EVENT_NONE) break;
 
         if (type == SCREEN_EVENT_KEYBOARD) {
             int sym = 0, flags = 0;
-            screen_get_event_property_iv(ev, SCREEN_PROPERTY_SYM, &sym);
-            screen_get_event_property_iv(ev, SCREEN_PROPERTY_KEY_FLAGS, &flags);
+            screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_SYM, &sym);
+            screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_FLAGS, &flags);
             uint32_t bit = sym_to_bit(sym);
-            if (flags & SCREEN_KEY_DOWN) g_held_keys |= bit;
+            if (getenv("WH_KEYDEBUG") && (flags & SCREEN_FLAG_KEY_DOWN))
+                fprintf(stderr, "KEYDBG sym=0x%x (%d) '%c' flags=0x%x bit=%u\n",
+                        sym, sym, (sym >= 32 && sym < 127) ? sym : '?', flags, bit);
+            if (flags & SCREEN_FLAG_KEY_DOWN) g_held_keys |= bit;
             else g_held_keys &= ~bit;
-            if (sym == KEYCODE_ESCAPE && (flags & SCREEN_KEY_DOWN)) g_quit = true;
+            if (sym == KEYCODE_ESCAPE && (flags & SCREEN_FLAG_KEY_DOWN)) g_quit = true;
+        } else if (type == SCREEN_EVENT_POINTER) {
+            // TODO(bringup): never exercised on target — no QNX mouse precedent
+            // in this codebase. Symbols verified against SDP 8.0 screen.h, but
+            // behavior is unverified. KEY_SHOOT (J/Z) stays wired as the
+            // fallback path precisely because of this. Test with a USB mouse
+            // during the M3 first-hour spike, alongside the keyboard check
+            // (PRD §5.4 step 7).
+            int pos[2] = { 0, 0 };
+            int buttons = 0;
+            // For pointer events SCREEN_PROPERTY_POSITION is the window-relative
+            // contact point; SOURCE_POSITION would be display-absolute.
+            screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_POSITION, pos);
+            screen_get_event_property_iv(n->ev, SCREEN_PROPERTY_BUTTONS, &buttons);
+            // Window buffer is fixed at the internal resolution (D4), so
+            // window-relative coords are already internal-space.
+            g_mouse_x = (float)pos[0];
+            g_mouse_y = (float)pos[1];
+            g_mouse_down = (buttons & SCREEN_LEFT_MOUSE_BUTTON) != 0;
         }
     }
     out->keys = g_held_keys;
+    out->mouse_x = g_mouse_x;
+    out->mouse_y = g_mouse_y;
+    out->mouse_down = g_mouse_down;
     out->quit_requested = g_quit;
 }
 

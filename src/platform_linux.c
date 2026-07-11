@@ -4,6 +4,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/XKBlib.h>
 #include <X11/keysym.h>
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -39,6 +40,8 @@ static uint32_t keysym_to_bit(KeySym sym) {
 
 static uint32_t g_held_keys = 0;
 static bool     g_quit = false;
+static float    g_mouse_x = 0.0f, g_mouse_y = 0.0f;
+static bool     g_mouse_down = false;
 
 bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
     LinuxNative* n = calloc(1, sizeof(LinuxNative));
@@ -51,18 +54,14 @@ bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
         return false;
     }
 
+    // Auto-repeat otherwise sends synthetic KeyRelease/KeyPress pairs while a
+    // key is held, which can make a held SHOOT/direction key read as
+    // released within a single plat_poll.
+    Bool xkb_supported;
+    XkbSetDetectableAutoRepeat(n->dpy, True, &xkb_supported);
+
     int screen = DefaultScreen(n->dpy);
     Window root = RootWindow(n->dpy, screen);
-
-    XSetWindowAttributes swa = {0};
-    swa.event_mask = KeyPressMask | KeyReleaseMask | StructureNotifyMask;
-    n->win = XCreateWindow(n->dpy, root, 0, 0, desired_w, desired_h, 0,
-                            CopyFromParent, InputOutput, CopyFromParent,
-                            CWEventMask, &swa);
-    XStoreName(n->dpy, n->win, "windowed-hell");
-    n->wm_delete = XInternAtom(n->dpy, "WM_DELETE_WINDOW", False);
-    XSetWMProtocols(n->dpy, n->win, &n->wm_delete, 1);
-    XMapWindow(n->dpy, n->win);
 
     n->egl_dpy = eglGetDisplay((EGLNativeDisplayType)n->dpy);
     if (n->egl_dpy == EGL_NO_DISPLAY) {
@@ -89,6 +88,37 @@ bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
         return false;
     }
 
+    // Window's visual must match the chosen EGLConfig's visual, not
+    // CopyFromParent — harmless on llvmpipe, a classic BadMatch on real
+    // drivers.
+    EGLint visual_id;
+    if (!eglGetConfigAttrib(n->egl_dpy, cfg, EGL_NATIVE_VISUAL_ID, &visual_id)) {
+        fprintf(stderr, "plat_init: eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID) failed\n");
+        return false;
+    }
+    XVisualInfo vis_template = {0};
+    vis_template.visualid = (VisualID)visual_id;
+    int num_vis = 0;
+    XVisualInfo* vis = XGetVisualInfo(n->dpy, VisualIDMask, &vis_template, &num_vis);
+    if (!vis || num_vis < 1) {
+        fprintf(stderr, "plat_init: XGetVisualInfo found no match for EGL visual id\n");
+        return false;
+    }
+
+    XSetWindowAttributes swa = {0};
+    swa.event_mask = KeyPressMask | KeyReleaseMask | StructureNotifyMask |
+                      PointerMotionMask | ButtonPressMask | ButtonReleaseMask;
+    swa.colormap = XCreateColormap(n->dpy, root, vis->visual, AllocNone);
+    n->win = XCreateWindow(n->dpy, root, 0, 0, desired_w, desired_h, 0,
+                            vis->depth, InputOutput, vis->visual,
+                            CWEventMask | CWColormap, &swa);
+    XFree(vis);
+
+    XStoreName(n->dpy, n->win, "windowed-hell");
+    n->wm_delete = XInternAtom(n->dpy, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(n->dpy, n->win, &n->wm_delete, 1);
+    XMapWindow(n->dpy, n->win);
+
     n->egl_surf = eglCreateWindowSurface(n->egl_dpy, cfg, (EGLNativeWindowType)n->win, NULL);
     if (n->egl_surf == EGL_NO_SURFACE) {
         fprintf(stderr, "plat_init: eglCreateWindowSurface failed\n");
@@ -106,6 +136,11 @@ bool plat_init(PlatformWindow* w, int desired_w, int desired_h) {
         fprintf(stderr, "plat_init: eglMakeCurrent failed\n");
         return false;
     }
+
+    // Seed the cursor at center so aim is well-defined before the first
+    // MotionNotify arrives.
+    g_mouse_x = (float)desired_w * 0.5f;
+    g_mouse_y = (float)desired_h * 0.5f;
 
     w->width  = desired_w;
     w->height = desired_h;
@@ -147,6 +182,20 @@ void plat_poll(PlatformWindow* w, PlatformInput* out) {
                 g_held_keys &= ~keysym_to_bit(sym);
                 break;
             }
+            case MotionNotify:
+                // Window is created at exactly the internal resolution and
+                // never resized (no ConfigureNotify handling), so raw
+                // window-space coords are already internal-space — no scale
+                // needed. Revisit if live resize support ever lands.
+                g_mouse_x = (float)ev.xmotion.x;
+                g_mouse_y = (float)ev.xmotion.y;
+                break;
+            case ButtonPress:
+                if (ev.xbutton.button == Button1) g_mouse_down = true;
+                break;
+            case ButtonRelease:
+                if (ev.xbutton.button == Button1) g_mouse_down = false;
+                break;
             case ClientMessage:
                 if ((Atom)ev.xclient.data.l[0] == n->wm_delete) g_quit = true;
                 break;
@@ -154,6 +203,9 @@ void plat_poll(PlatformWindow* w, PlatformInput* out) {
         }
     }
     out->keys = g_held_keys;
+    out->mouse_x = g_mouse_x;
+    out->mouse_y = g_mouse_y;
+    out->mouse_down = g_mouse_down;
     out->quit_requested = g_quit;
 }
 

@@ -446,18 +446,27 @@ static void draw_pshots(const SimSnapshot* snap, float sx, float sy) {
     }
 }
 
-static void draw_player(const SimSnapshot* snap, float sx, float sy) {
-    bool blink_hidden = (snap->player.flags & 2u) &&
-                         ((snap->tick / PLAYER_BLINK_HALF_PERIOD_TICKS) % 2 == 1);
+static void draw_one_ship(const SnapEntity* e, float hit_flash, uint8_t color_idx,
+                           uint64_t tick, uint8_t state, float sx, float sy) {
+    bool blink_hidden = (e->flags & 2u) && ((tick / PLAYER_BLINK_HALF_PERIOD_TICKS) % 2 == 1);
     if (blink_hidden) return;
 
-    RGBA color = PALETTE_PLAYER;
-    if (snap->hit_flash > 0.0f && snap->state == SIM_STATE_PLAY) {
-        color = lerp_rgba(color, WHITE, snap->hit_flash);
+    RGBA color = (color_idx < SHIP_COLOR_COUNT) ? PALETTE_SHIP_COLORS[color_idx] : PALETTE_PLAYER;
+    if (hit_flash > 0.0f && state == SIM_STATE_PLAY) {
+        color = lerp_rgba(color, WHITE, hit_flash);
     }
-    render_push_quad(snap->player.x + sx - PLAYER_SPRITE_SIZE * 0.5f,
-                      snap->player.y + sy - PLAYER_SPRITE_SIZE * 0.5f,
+    render_push_quad(e->x + sx - PLAYER_SPRITE_SIZE * 0.5f,
+                      e->y + sy - PLAYER_SPRITE_SIZE * 0.5f,
                       PLAYER_SPRITE_SIZE, PLAYER_SPRITE_SIZE, ATLAS_PLAYER, color);
+}
+
+static void draw_player(const SimSnapshot* snap, float sx, float sy) {
+    draw_one_ship(&snap->player, snap->hit_flash, snap->player_color[0],
+                  snap->tick, snap->state, sx, sy);
+    if (snap->player_count == 2) {
+        draw_one_ship(&snap->player2, snap->hit_flash2, snap->player_color[1],
+                      snap->tick, snap->state, sx, sy);
+    }
 }
 
 static void draw_bullets(const SimSnapshot* snap, float sx, float sy) {
@@ -480,12 +489,92 @@ static float border_pulse_mult(uint64_t tick, float danger) {
     return 1.0f - danger * (1.0f - pulse);
 }
 
-static void draw_menu_screen(void) {
+// --------------------------------------------------------- front end -----
+// MODE_SELECT -> [WAITING_ROOM, multiplayer only] -> COLOR_SELECT -> PLAY.
+// R, from anywhere, always returns to MODE_SELECT (see sim.c) — this is the
+// one and only "menu" a player ever has to find their way back to.
+
+static const char* MODE_SELECT_NAMES[3] = { "SINGLE PLAYER", "HOST GAME", "JOIN GAME" };
+
+static void draw_mode_select_screen(const SimSnapshot* snap) {
     float cx = INTERNAL_W * 0.5f;
-    draw_centered_text(cx, INTERNAL_H * 0.5f - 80.0f, 4.0f, "WINDOWED HELL", PALETTE_BORDER_NORMAL);
-    draw_centered_text(cx, INTERNAL_H * 0.5f - 10.0f, 2.0f, "PRESS SHOOT TO START", PALETTE_PLAYER);
-    draw_centered_text(cx, INTERNAL_H * 0.5f + 30.0f, 1.0f,
+    RGBA dim = { 0.5f, 0.5f, 0.5f, 1.0f };
+
+    draw_centered_text(cx, INTERNAL_H * 0.5f - 110.0f, 4.0f, "WINDOWED HELL", PALETTE_BORDER_NORMAL);
+    for (int i = 0; i < 3; i++) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%s%s", snap->mode_sel_cursor == i ? "-> " : "   ", MODE_SELECT_NAMES[i]);
+        draw_centered_text(cx, INTERNAL_H * 0.5f - 20.0f + (float)i * 30.0f, 2.0f, buf,
+                            snap->mode_sel_cursor == i ? PALETTE_PLAYER : dim);
+    }
+    draw_centered_text(cx, INTERNAL_H * 0.5f + 90.0f, 1.0f,
+                        "UP/DOWN SELECT   SHOOT TO CONFIRM", PALETTE_HUD_TEXT);
+    draw_centered_text(cx, INTERNAL_H * 0.5f + 110.0f, 1.0f,
                         "WINDOW MECHANIC INSPIRED BY WINDOWKILL (TORCADO)", PALETTE_HUD_TEXT);
+}
+
+static void draw_waiting_room_screen(const SimSnapshot* snap) {
+    float cx = INTERNAL_W * 0.5f;
+    const char* role_line = (snap->net_role == NET_ROLE_HOST) ? "HOSTING" : "JOINING";
+    draw_centered_text(cx, INTERNAL_H * 0.5f - 40.0f, 3.0f, role_line, PALETTE_BORDER_NORMAL);
+
+    // A few animated dots so the screen never reads as frozen while retries
+    // happen silently underneath (see netplay.h's unreliable-retry handshake).
+    char dots[4] = { 0 };
+    int n = (int)((snap->tick / 60) % 4);
+    for (int i = 0; i < n; i++) dots[i] = '.';
+    char line[40];
+    snprintf(line, sizeof(line), "WAITING FOR PLAYER%s", dots);
+    draw_centered_text(cx, INTERNAL_H * 0.5f + 10.0f, 2.0f, line, PALETTE_PLAYER);
+    draw_centered_text(cx, INTERNAL_H * 0.5f + 50.0f, 1.0f, "R TO CANCEL", PALETTE_HUD_TEXT);
+}
+
+#define COLOR_SWATCH_SIZE   16.0f
+#define COLOR_SWATCH_GAP     8.0f
+#define COLOR_COLUMN_W     220.0f
+
+static void draw_color_select_screen(const SimSnapshot* snap) {
+    float cx = INTERNAL_W * 0.5f;
+    draw_centered_text(cx, INTERNAL_H * 0.5f - 110.0f, 2.5f, "CHOOSE YOUR SHIP", PALETTE_PLAYER);
+
+    int n = snap->player_count;
+    float start_x = cx - (float)n * COLOR_COLUMN_W * 0.5f;
+
+    for (int pi = 0; pi < n; pi++) {
+        float col_cx = start_x + (float)pi * COLOR_COLUMN_W + COLOR_COLUMN_W * 0.5f;
+        char label[8];
+        snprintf(label, sizeof(label), "P%d", pi + 1);
+        draw_centered_text(col_cx, INTERNAL_H * 0.5f - 50.0f, 1.5f, label, PALETTE_HUD_TEXT);
+
+        float row_w = (float)COLOR_COUNT * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP) - COLOR_SWATCH_GAP;
+        float row_x0 = col_cx - row_w * 0.5f;
+        int other = 1 - pi;
+        bool other_confirmed = n == 2 && snap->color_confirmed[other] != COLOR_UNCONFIRMED;
+
+        for (int c = 0; c < COLOR_COUNT && c < SHIP_COLOR_COUNT; c++) {
+            float swx = row_x0 + (float)c * (COLOR_SWATCH_SIZE + COLOR_SWATCH_GAP);
+            float swy = INTERNAL_H * 0.5f - COLOR_SWATCH_SIZE * 0.5f;
+
+            RGBA col = PALETTE_SHIP_COLORS[c];
+            bool taken = other_confirmed && snap->color_confirmed[other] == (uint8_t)c;
+            if (taken) col = scale_rgb(col, 0.25f);
+            render_push_quad(swx, swy, COLOR_SWATCH_SIZE, COLOR_SWATCH_SIZE, ATLAS_WHITE, col);
+
+            bool is_cursor = snap->color_confirmed[pi] == COLOR_UNCONFIRMED && snap->color_sel[pi] == (uint8_t)c;
+            bool is_chosen = snap->color_confirmed[pi] == (uint8_t)c;
+            if (is_cursor || is_chosen) {
+                render_push_quad(swx - 2.0f, swy + COLOR_SWATCH_SIZE + 4.0f,
+                                  COLOR_SWATCH_SIZE + 4.0f, 3.0f, ATLAS_WHITE, WHITE);
+            }
+        }
+
+        if (snap->color_confirmed[pi] != COLOR_UNCONFIRMED) {
+            draw_centered_text(col_cx, INTERNAL_H * 0.5f + 40.0f, 1.0f, "CONFIRMED", PALETTE_PLAYER);
+        }
+    }
+
+    draw_centered_text(cx, INTERNAL_H * 0.5f + 80.0f, 1.0f,
+                        "LEFT/RIGHT SELECT   SHOOT TO CONFIRM", PALETTE_HUD_TEXT);
 }
 
 static void draw_dead_screen(const SimSnapshot* snap) {
@@ -575,7 +664,9 @@ void render_draw_world(const SimSnapshot* snap) {
 
     if (snap->boss_tp_active) draw_tp_ghost(snap, sx, sy);
 
-    if (snap->state == SIM_STATE_MENU) draw_menu_screen();
+    if (snap->state == SIM_STATE_MODE_SELECT) draw_mode_select_screen(snap);
+    else if (snap->state == SIM_STATE_WAITING_ROOM) draw_waiting_room_screen(snap);
+    else if (snap->state == SIM_STATE_COLOR_SELECT) draw_color_select_screen(snap);
     else if (snap->state == SIM_STATE_UPGRADE) draw_upgrade_screen(snap);
     else if (snap->state == SIM_STATE_DEAD) draw_dead_screen(snap);
 

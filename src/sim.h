@@ -60,6 +60,14 @@ enum { EDGE_LEFT = 0, EDGE_RIGHT = 1, EDGE_TOP = 2, EDGE_BOTTOM = 3 };
 #define PLAYER_FOCUS_SPEED_DEFAULT 120.0f
 #define PLAYER_HITBOX_R    3.0f
 #define LIVES_START 3
+#define LIVES_START_COOP 4  // shared pool: any hit on either ship costs one
+
+// Co-op balance knobs (two guns ~= double push + DPS against a single shared
+// window/wave). Starting points for a feel pass, same spirit as the SP
+// PSHOT_FIRE_HZ_DEFAULT retune in DESIGN_CHANGES.md — not final.
+#define COOP_SHRINK_MULT 1.6f
+#define COOP_WAVE_BONUS  1   // extra Triangle/Circle/Octagon per wave in co-op
+#define COOP_ENEMY_HP_MULT 1.5f  // two guns kill much faster; confirmed via real 2-Pi playtest
 
 #define PSHOT_SPEED      700.0f
 // Shots/sec while held. Deliberately slow: shooting is the managed resource
@@ -195,6 +203,18 @@ typedef struct {
     bool     use_aim_q;
 } InputState;
 
+// Per-ship state (PRD §8.2, now x2 for co-op). Index 0 is always the host/
+// single-player ship; index 1 exists only when player_count == 2.
+typedef struct {
+    float    x, y;
+    uint16_t aim_q;
+    float    aim_dx, aim_dy;
+    float    move_dx, move_dy;  // last nonzero movement direction; keyboard-shoot fallback
+    int      shoot_cooldown_ticks;
+    int      invuln_ticks;
+    float    hit_flash;         // this ship's own hit-white tint, decays for HUD/juice
+} Player;
+
 typedef struct {
     float    pos, vel, target;   // 1-D spring state
     float    push_amount;        // last-applied push magnitude (diminishing returns)
@@ -252,11 +272,21 @@ typedef struct {
     uint64_t   tick;
     uint64_t   seed;
     Rng        rng;
-    InputState input;
-    uint32_t   prev_keys;        // input.keys as of the previous sim_step, for edge detection
-    bool       prev_mouse_down;  // ditto, for click edge detection
+    InputState input[2];       // index 0 = host/SP, index 1 = joiner (co-op only)
+    uint32_t   prev_keys[2];   // input[i].keys as of the previous sim_step, for edge detection
+    bool       prev_mouse_down[2];  // ditto, for click edge detection
 
     uint8_t state;  // SIM_STATE_*
+
+    // --- front end: MODE_SELECT / WAITING_ROOM / COLOR_SELECT ---
+    // Deterministic (derived from input alone), so it rides in Sim/SimSnapshot
+    // like everything else the front end draws, and replays reproduce it.
+    uint8_t player_count;       // 1 = single-player, 2 = co-op; decided at MODE_SELECT confirm
+    uint8_t mode_sel_cursor;    // 0=SINGLE PLAYER 1=HOST GAME 2=JOIN GAME
+    uint8_t net_role;           // NET_ROLE_* — confirmed choice; drives WAITING_ROOM and netplay_service
+    uint8_t color_sel[2];       // each present player's picker cursor
+    uint8_t color_confirmed[2]; // COLOR_UNCONFIRMED, else the confirmed palette index
+    uint8_t player_color[2];    // confirmed ship colors — set once, survive into PLAY
     // M3 acceptance-test aid (PRD §10, "60 fps with 2048 test bullets
     // bouncing"): when set, step_bullets() bounces off the fixed screen
     // bounds instead of despawning outside the window, giving a sustained,
@@ -268,14 +298,8 @@ typedef struct {
     float      edge_flash[4];  // decays ~2 ticks after a push
     float      shake_x, shake_y;
 
-    float    player_x, player_y;
-    uint16_t aim_q;            // canonical aim angle (quantized); see AIM_Q_STEPS
-    float    aim_dx, aim_dy;   // derived from aim_q alone — never set directly
-    float    move_dx, move_dy; // last nonzero movement direction, drives the keyboard-shoot fallback
-    int      shoot_cooldown_ticks;
-    int   invuln_ticks;
-    int   hitstop_ticks;
-    float hit_flash;           // player's own hit-white tint, decays for HUD/juice
+    Player players[2];         // players[1] valid iff player_count == 2
+    int   hitstop_ticks;       // shared: a hitstop freezes the whole arena, not one ship
 
     // upgrade-mutable balance (defaults from the *_DEFAULT constants above)
     float player_speed;
@@ -340,7 +364,19 @@ void sim_start_at_wave(Sim* sim, int wave);
 // (see stress_mode). n is clamped to MAX_BULLETS. Not reachable from normal
 // input.
 void sim_start_stress(Sim* sim, int n);
-void sim_consume_input(Sim* sim, InputRing* ring);
+// Drains `ring` into sim->input[local_idx] (the LOCAL machine's ship — 0 for
+// single-player/host, 1 for a joiner once past WAITING_ROOM; see main.c).
+void sim_consume_input(Sim* sim, InputRing* ring, int local_idx);
+
+// netplay.c's one deliberate reach into sim.c's state machine: called once,
+// on both machines independently, the instant the handshake completes (see
+// netplay.h). Equivalent to sim_init(seed) followed by landing exactly where
+// MODE_SELECT's SINGLE PLAYER branch would — at COLOR_SELECT with a fresh,
+// unconfirmed picker — except player_count/net_role are set for co-op. Both
+// sides call this at their own "tick 0", which is what keeps lockstep tick
+// numbering aligned without a shared clock.
+void sim_begin_multiplayer_run(Sim* sim, uint64_t seed, uint8_t net_role);
+
 void sim_step(Sim* sim);
 void sim_publish(const Sim* sim, SnapshotBuffer* sb);
 

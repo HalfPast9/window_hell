@@ -2,6 +2,95 @@
 
 Timestamped notes on every QNX/Pi/toolchain gotcha encountered. Newest entries at top.
 
+## 2026-07-12 — Co-op multiplayer built (dev-box verified end-to-end; Pi bring-up NOT yet done)
+
+Two Pis are both offline right now (one mid-reflash), so this entire session was
+built and verified on the Windows dev box only: WSL2 Ubuntu-24.04 for the
+Linux target/headless tools, `qcc` (Windows-host SDP, sourced directly from
+Git Bash per the 2026-07-10 entry below) for both QNX cross-targets. **Phase 6
+(actual two-Pi direct-cable bring-up) has not started** — everything below is
+"works on the dev box"; the static-IP direct-link addressing, wired-NIC name,
+and on-target jitter numbers are still open questions for whenever the
+hardware is back.
+
+**What shipped:** the whole front end is now `MODE_SELECT -> [WAITING_ROOM,
+multiplayer only] -> COLOR_SELECT -> PLAY -> UPGRADE -> DEAD`, replacing the
+old single "press shoot" menu. Single-player is unchanged in feel (same
+balance, same controls) with the color picker as the only new step. Co-op is
+lockstep: both machines run the full deterministic sim (already proven
+bit-identical by `replaycheck`) and exchange only each tick's tiny input over
+UDP — a replay streamed live rather than read from disk. New files
+`src/netplay.h/.c` (handshake + lockstep exchange + a seqlock status board
+for the render thread) and `tools/mp_check.c` (the lockstep analogue of
+`replaycheck`, over *real* loopback UDP sockets, nothing mocked). `sim.c`
+grew a `Player players[2]` array, per-player collision/stepping, nearest-
+player enemy targeting, and a shared lives pool (`LIVES_START_COOP=4`).
+R, from anywhere, now always returns to `MODE_SELECT` — never a shortcut back
+into `PLAY` — including tearing down the netplay socket if one was open.
+
+**Three real bugs, all caught by `mp-check` before ever touching two windows:**
+
+1. **The local input ring had a permanent hole in ticks 1..D.** The delay
+   buffer's whole point is "poll now, deliver D ticks later," but the very
+   first poll after establishing targets tick `1+D` — nothing ever pushes
+   ticks `1..D`, so the sim waited forever for input that would never arrive
+   (`mp-check` hung at "host tick 0, join tick 0" indefinitely). Fixed by
+   having both sides independently pre-seed *both* rings for the bootstrap
+   range with the same neutral default (screen-center cursor, no keys) the
+   instant they establish — a known protocol convention, not data, so it
+   needs no wire message and stays symmetric by construction.
+2. **`sim_hash()` false-positives across a HOST/JOIN pair.** It hashes the
+   raw `Sim` struct, and `net_role` is the *one* field each side legitimately
+   sets to a different value on purpose (each machine knows its own role).
+   Left in, `mp-check`'s comparison — and worse, the in-game desync detector
+   that drives the HUD's `SYNC OK`/`DESYNC` line — would permanently disagree
+   even on a perfectly synced session. Both now hash a copy with `net_role`
+   zeroed first (mirrors `replaycheck.c`'s existing `gameplay_hash()`
+   pattern, which excludes `InputState` for the analogous live-vs-replay
+   reason).
+3. **Two same-machine processes can't both bind the well-known UDP port.**
+   Needed for the dev-box loopback test (host + join as two processes on one
+   box) and free on real separate Pis, but would have broken here outright.
+   Fixed in `netplay_init`: HOST binds the fixed port so a joiner can find it
+   by address alone; JOIN binds an *ephemeral* port (0) and only ever talks
+   to the one host address/port it already knows.
+
+**Verification, all on the dev box:**
+- `make replaycheck` — still green (hash unchanged from before this session:
+  `d8b572a1d29c872e`), confirming single-player determinism/replay survived
+  the `Player[2]` refactor untouched.
+- `make mp-check` — PASS: two `Sim`s + two `NetplayState`s talking over real
+  loopback UDP in one process, 3000 ticks, **0 stalls either side**, hashes
+  match exactly (`bb4c453011ece38f` both sides).
+- Visual, single-player (WSLg + `xdotool`/`import`, one process): MODE_SELECT
+  → SINGLE PLAYER → COLOR_SELECT (swatch row, cursor underline, all render
+  correctly) → PLAY (HUD, window, ship) → R → **lands back on MODE_SELECT**,
+  not PLAY — the exact behavior asked for.
+- Visual, two-process loopback co-op (`--mp-host --mp-port 47950` /
+  `--mp-join 127.0.0.1 --mp-port 47950`, auto-starting straight into
+  WAITING_ROOM): both windows reach an identical, synchronized COLOR_SELECT
+  (P2's default cursor already visible on both sides — proves the
+  WAITING_ROOM→COLOR_SELECT jump landed on the same tick on both machines);
+  after both confirm, both windows show pixel-identical enemy positions,
+  matching tick-adjacent HUDs, `LIVES 4` (shared co-op pool), correctly
+  colored ships (white/orange), and `NET HOST/JOIN D4 STALL 0 SYNC OK` on
+  both — live proof the desync-hash exchange agrees, not just the isolated
+  `mp-check` harness.
+- Visual, peer-lost: `kill -9` the join process mid-session → host's NET line
+  correctly flips to `PEER LOST` within the 2 s timeout, stall count climbing
+  while it waits.
+- `qcc -Vgcc_ntoaarch64le` and `qcc -Vgcc_ntox86_64` both cross-compile clean
+  (`-Wall -Wextra`, zero warnings) with `netplay.c` added to `SRC_COMMON`;
+  `file` confirms correct arch + `ldqnx-64.so.2` interpreter on both. Neither
+  has been run — no target yet (same caveat as every QNX entry before M3).
+
+**Known gap, not chased:** F2/F3 (replay record/playback) are disabled
+outright in multiplayer — the on-disk format is a single input stream;
+extending it to two is flagged in the plan as a cheap follow-up, not done
+here. Co-op balance (`COOP_SHRINK_MULT=1.6`, `COOP_WAVE_BONUS=1`) is a
+starting point, not a tuned value — same spirit as every other constant in
+this file, needs a feel pass once two people can actually sit at two Pis.
+
 ## 2026-07-12 — Camera-based hand-tracking abandoned; reverted to keyboard+mouse
 
 Explored camera bring-up (Pi Camera Module 3 / imx708 via the QNX Sensor

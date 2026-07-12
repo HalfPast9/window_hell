@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stdatomic.h>
+#include <string.h>
 
 #define MAX_BULLETS 4096
 #define MAX_ENEMIES 128
@@ -32,7 +33,25 @@ typedef struct { float x, y; uint8_t sprite; uint8_t flags; uint8_t age; } SnapE
 // SnapBeam.state: 0=telegraph(dotted) 1=firing
 typedef struct { float x, y, angle, len, width; uint8_t state; } SnapBeam;
 
-enum { SIM_STATE_MENU = 0, SIM_STATE_PLAY, SIM_STATE_UPGRADE, SIM_STATE_DEAD };
+// Front end grew from one MENU screen into three: pick a mode, (multiplayer
+// only) wait for a peer, then pick a ship color. Restart from anywhere always
+// returns to MODE_SELECT (never shortcuts back into PLAY) — see sim.c.
+enum {
+    SIM_STATE_MODE_SELECT = 0,
+    SIM_STATE_WAITING_ROOM,
+    SIM_STATE_COLOR_SELECT,
+    SIM_STATE_PLAY,
+    SIM_STATE_UPGRADE,
+    SIM_STATE_DEAD,
+};
+
+// MODE_SELECT cursor / confirmed choice. Deterministic (derived from input
+// alone), so it's part of Sim/SimSnapshot like everything else the front end
+// draws. NONE means single-player.
+enum { NET_ROLE_NONE = 0, NET_ROLE_HOST = 1, NET_ROLE_JOIN = 2 };
+
+#define COLOR_COUNT 5  // see PALETTE_SHIP_COLORS in palette.h
+#define COLOR_UNCONFIRMED 0xFFu
 
 typedef struct {
     uint64_t tick;
@@ -61,6 +80,7 @@ typedef struct {
 
     // entities
     SnapEntity player;
+    SnapEntity player2;         // valid iff player_count == 2
     uint16_t bullet_count; SnapEntity bullets[MAX_BULLETS];
     uint16_t enemy_count;  SnapEntity enemies[MAX_ENEMIES];
     uint16_t pshot_count;  SnapEntity pshots[MAX_PSHOTS];
@@ -71,7 +91,16 @@ typedef struct {
     uint8_t  lives, wave, state;    // state: SIM_STATE_*
     uint8_t  upgrade_a, upgrade_b;  // UPGRADE state: two offered ids (PRD §8.3a)
     uint8_t  upgrade_selected;      // 0 = a, 1 = b
-    float    hit_flash, shake_x, shake_y;
+    float    hit_flash, hit_flash2; // per-ship hit-white tint; hit_flash2 valid iff player_count==2
+    float    shake_x, shake_y;
+
+    // front end (MODE_SELECT / WAITING_ROOM / COLOR_SELECT)
+    uint8_t player_count;          // 1 = single-player, 2 = co-op
+    uint8_t mode_sel_cursor;       // 0=SINGLE PLAYER 1=HOST GAME 2=JOIN GAME
+    uint8_t net_role;              // NET_ROLE_* — confirmed choice, drives WAITING_ROOM text
+    uint8_t color_sel[2];          // each present player's picker cursor
+    uint8_t color_confirmed[2];    // COLOR_UNCONFIRMED, else the confirmed palette index
+    uint8_t player_color[2];       // confirmed ship colors, valid from COLOR_SELECT's end onward
 } SimSnapshot;
 
 #define SNAPSHOT_INDEX_MASK 0x3u
@@ -85,6 +114,15 @@ typedef struct {
 } SnapshotBuffer;
 
 static inline void snapshot_buffer_init(SnapshotBuffer* sb) {
+    // Zero the slot contents, not just the handoff indices: the render
+    // thread can read a snapshot before the sim thread has ever published
+    // one (the race window is normally microseconds — sim_step's first call
+    // is immediate — but MP's WAITING_ROOM widens it a lot, since the sim
+    // thread's first action is netplay_init()'s real socket/bind syscalls).
+    // An unzeroed slot leaves enemy_count/bullet_count/etc. as garbage
+    // uint16_t values used directly as draw-loop bounds in render.c —
+    // reading enemies[]/bullets[] far out of bounds on that first frame.
+    memset(sb->slots, 0, sizeof(sb->slots));
     sb->write_idx = 0;
     sb->read_idx = 2;
     atomic_store_explicit(&sb->state, 1u, memory_order_relaxed); // middle = slot 1, not dirty

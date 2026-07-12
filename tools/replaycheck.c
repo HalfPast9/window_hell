@@ -44,7 +44,7 @@ static void scripted_input(uint64_t tick, uint32_t* keys, float* mx, float* my, 
 // — otherwise we'd be diffing how the tick was driven, not what it did.
 static uint64_t gameplay_hash(const Sim* sim) {
     Sim tmp = *sim;
-    memset(&tmp.input, 0, sizeof(tmp.input));
+    memset(tmp.input, 0, sizeof(tmp.input));
     return sim_hash(&tmp);
 }
 
@@ -57,18 +57,18 @@ static uint64_t run_live(uint64_t seed, ReplayRecorder* rec) {
         uint32_t keys; float mx, my; bool fire;
         scripted_input(i, &keys, &mx, &my, &fire);
 
-        sim.input.keys = keys;
-        sim.input.mouse_x = mx;
-        sim.input.mouse_y = my;
-        sim.input.mouse_down = fire;
-        sim.input.use_aim_q = false;
+        sim.input[0].keys = keys;
+        sim.input[0].mouse_x = mx;
+        sim.input[0].mouse_y = my;
+        sim.input[0].mouse_down = fire;
+        sim.input[0].use_aim_q = false;
 
         sim_step(&sim);
 
         if (rec) {
-            uint16_t k16 = (uint16_t)(sim.input.keys & REPLAY_KEY_MASK);
-            if (sim.input.mouse_down) k16 |= REPLAY_KEY_MOUSE_FIRE;
-            replay_record_tick(rec, sim.tick, k16, sim.aim_q);
+            uint16_t k16 = (uint16_t)(sim.input[0].keys & REPLAY_KEY_MASK);
+            if (sim.input[0].mouse_down) k16 |= REPLAY_KEY_MOUSE_FIRE;
+            replay_record_tick(rec, sim.tick, k16, sim.players[0].aim_q);
         }
     }
     return gameplay_hash(&sim);
@@ -82,10 +82,10 @@ static uint64_t run_playback(ReplayPlayer* p) {
         uint16_t k16, aim_q;
         if (!replay_input_for_tick(p, i, &k16, &aim_q)) break;
 
-        sim.input.keys = (uint32_t)(k16 & REPLAY_KEY_MASK);
-        sim.input.mouse_down = (k16 & REPLAY_KEY_MOUSE_FIRE) != 0;
-        sim.input.aim_q = aim_q;
-        sim.input.use_aim_q = true;
+        sim.input[0].keys = (uint32_t)(k16 & REPLAY_KEY_MASK);
+        sim.input[0].mouse_down = (k16 & REPLAY_KEY_MOUSE_FIRE) != 0;
+        sim.input[0].aim_q = aim_q;
+        sim.input[0].use_aim_q = true;
 
         sim_step(&sim);
     }

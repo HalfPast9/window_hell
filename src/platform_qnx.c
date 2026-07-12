@@ -217,6 +217,18 @@ void plat_poll(PlatformWindow* w, PlatformInput* out) {
             if (getenv("WH_KEYDEBUG") && (flags & SCREEN_FLAG_KEY_DOWN))
                 fprintf(stderr, "KEYDBG sym=0x%x (%d) '%c' flags=0x%x bit=%u\n",
                         sym, sym, (sym >= 32 && sym < 127) ? sym : '?', flags, bit);
+            // OS auto-repeat while a key is held arrives as separate
+            // SCREEN_EVENT_KEYBOARD pulses flagged SCREEN_FLAG_KEY_REPEAT —
+            // the QNX Screen counterpart to X11's synthetic repeat
+            // release/press pairs (platform_linux.c's XkbSetDetectableAutoRepeat
+            // fix). g_held_keys already has the bit set from the real press;
+            // reprocessing repeat pulses is a no-op for held-key gameplay
+            // movement but a real bug for edge-triggered UI navigation
+            // (MODE_SELECT/COLOR_SELECT/UPGRADE cursors, sim.c's key_edge()):
+            // it made cursor movement fire once per repeat pulse instead of
+            // once per press, reading as "scrolls through on its own" while
+            // held. Skip repeat pulses outright — genuine press/release only.
+            if (flags & SCREEN_FLAG_KEY_REPEAT) continue;
             if (flags & SCREEN_FLAG_KEY_DOWN) g_held_keys |= bit;
             else g_held_keys &= ~bit;
             if (sym == KEYCODE_ESCAPE && (flags & SCREEN_FLAG_KEY_DOWN)) g_quit = true;

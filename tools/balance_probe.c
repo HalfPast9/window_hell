@@ -27,24 +27,24 @@ typedef enum { POLICY_IDLE, POLICY_PUSH_RIGHT, POLICY_SPLIT_4 } Policy;
 static bool g_park_enemies = false;
 
 static void set_input(Sim* sim, Policy p, uint64_t tick) {
-    sim->input.keys = 0;
-    sim->input.mouse_down = (p != POLICY_IDLE);
+    sim->input[0].keys = 0;
+    sim->input[0].mouse_down = (p != POLICY_IDLE);
 
     switch (p) {
         case POLICY_IDLE:
-            sim->input.mouse_x = sim->player_x;
-            sim->input.mouse_y = sim->player_y - 100.0f;
+            sim->input[0].mouse_x = sim->players[0].x;
+            sim->input[0].mouse_y = sim->players[0].y - 100.0f;
             break;
         case POLICY_PUSH_RIGHT:  // aim straight out through the right edge
-            sim->input.mouse_x = INTERNAL_W;
-            sim->input.mouse_y = sim->player_y;
+            sim->input[0].mouse_x = INTERNAL_W;
+            sim->input[0].mouse_y = sim->players[0].y;
             break;
         case POLICY_SPLIT_4: {   // rotate aim across all four edges
             int quadrant = (int)((tick / 60) % 4);
             float tx[4] = { INTERNAL_W, 0.0f, INTERNAL_W * 0.5f, INTERNAL_W * 0.5f };
             float ty[4] = { INTERNAL_H * 0.5f, INTERNAL_H * 0.5f, 0.0f, INTERNAL_H };
-            sim->input.mouse_x = tx[quadrant];
-            sim->input.mouse_y = ty[quadrant];
+            sim->input[0].mouse_x = tx[quadrant];
+            sim->input[0].mouse_y = ty[quadrant];
             break;
         }
     }
@@ -56,10 +56,16 @@ static void run(const char* label, Policy p, int seconds) {
     sim_init(&sim, 12345);
     snapshot_buffer_init(&sb);
 
-    // jump straight into PLAY (bypass the menu click)
-    sim.input.mouse_down = true;
+    // Jump straight into PLAY (bypass MODE_SELECT + COLOR_SELECT): a shoot
+    // edge confirms SINGLE PLAYER (default cursor), landing in COLOR_SELECT;
+    // a second shoot edge confirms the default color, landing in PLAY.
+    sim.input[0].mouse_down = true;
     sim_step(&sim);
-    sim.input.mouse_down = false;
+    sim.input[0].mouse_down = false;
+    sim_step(&sim);
+    sim.input[0].mouse_down = true;
+    sim_step(&sim);
+    sim.input[0].mouse_down = false;
     sim_step(&sim);
 
     printf("\n=== %s ===\n", label);
@@ -85,11 +91,11 @@ static void run(const char* label, Policy p, int seconds) {
             sim_publish(&sim, &sb);
             const SimSnapshot* s = snapshot_acquire_read(&sb);
 
-            static const char* names[] = { "MENU", "PLAY", "UPGR", "DEAD" };
+            static const char* names[] = { "MODE", "WAIT", "CLR", "PLAY", "UPGR", "DEAD" };
             printf("%5llu  %6.1f  %6.1f   %5.2f  %5d  %5s  %5u\n",
                     (unsigned long long)(i / SIM_HZ),
                     s->playfield_w, s->playfield_h, s->danger,
-                    s->lives, names[s->state & 3], s->enemy_count);
+                    s->lives, names[s->state < 6 ? s->state : 0], s->enemy_count);
         }
     }
 }

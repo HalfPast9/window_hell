@@ -1,6 +1,6 @@
-.PHONY: all linux qnx qnx-x86 native deploy replaycheck balance-probe clean
+.PHONY: all linux qnx qnx-x86 native deploy replaycheck mp-check balance-probe clean
 
-SRC_COMMON := src/main.c src/sim.c src/metrics.c src/render.c src/hud.c src/replay.c src/handtrack.c
+SRC_COMMON := src/main.c src/sim.c src/metrics.c src/render.c src/hud.c src/replay.c src/handtrack.c src/netplay.c
 
 BIN_DIR := bin
 
@@ -74,6 +74,16 @@ replaycheck: $(REPLAYCHECK_BIN)
 
 $(REPLAYCHECK_BIN): tools/replaycheck.c src/sim.c src/replay.c src/sim.h src/replay.h | $(BIN_DIR)
 	$(LINUX_CC) $(LINUX_CFLAGS) -o $@ tools/replaycheck.c src/sim.c src/replay.c -lm
+
+# --- Lockstep determinism CI: the multiplayer analogue of replaycheck, over
+# real loopback UDP sockets (no mocked networking) — see tools/mp_check.c.
+MP_CHECK_BIN := $(BIN_DIR)/mp-check
+
+mp-check: $(MP_CHECK_BIN)
+	@$(MP_CHECK_BIN)
+
+$(MP_CHECK_BIN): tools/mp_check.c src/sim.c src/netplay.c src/sim.h src/netplay.h | $(BIN_DIR)
+	$(LINUX_CC) $(LINUX_CFLAGS) -o $@ tools/mp_check.c src/sim.c src/netplay.c -lm
 
 # --- Headless balance harness: drives sim_step with scripted input, no GL/X.
 # Answers window-tuning questions (does pushing outpace shrink?) against the

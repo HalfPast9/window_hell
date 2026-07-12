@@ -7,9 +7,13 @@
 #include <stdbool.h>
 
 #include "metrics.h"
+#include "netplay.h"
 #include "snapshot.h"
 
+// net_status may be NULL (single-player builds/tools that never touch
+// netplay); the NET line is simply omitted then.
 void hud_draw(const SimMetrics* sim_m, const RenderMetrics* render_m,
-              const SimSnapshot* snap, bool rec_active, bool play_active);
+              const SimSnapshot* snap, bool rec_active, bool play_active,
+              const NetplayStatus* net_status);
 
 #endif // HUD_H

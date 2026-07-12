@@ -71,8 +71,12 @@ static void add_shake(Sim* sim, float magnitude) {
 }
 
 static void step_window(Sim* sim) {
-    // The room closes faster while the boss is up (§8.3).
-    float rate = sim->shrink_rate * (sim->spiker_alive ? SPIKER_SHRINK_MULT : 1.0f);
+    // The room closes faster while the boss is up (§8.3), and faster still in
+    // co-op — two guns can push/kill roughly twice as fast against one shared
+    // window (a DESIGN_CHANGES.md-style knob: starting point for a feel pass,
+    // not a final tuned value).
+    float rate = sim->shrink_rate * (sim->spiker_alive ? SPIKER_SHRINK_MULT : 1.0f)
+                                   * (sim->player_count == 2 ? COOP_SHRINK_MULT : 1.0f);
     sim->edges[EDGE_LEFT].target   += rate * SIM_DT;
     sim->edges[EDGE_RIGHT].target  -= rate * SIM_DT;
     sim->edges[EDGE_TOP].target    += rate * SIM_DT;
@@ -113,6 +117,23 @@ static void aim_q_to_vector(uint16_t q, float* out_dx, float* out_dy) {
     *out_dy = sinf(radians);
 }
 
+// Nearest present player to (x,y) — a pure function of state, so enemy aim
+// stays deterministic. In single-player this always resolves to players[0].
+static void nearest_player_pos(const Sim* sim, float x, float y, float* out_x, float* out_y) {
+    if (sim->player_count < 2) {
+        *out_x = sim->players[0].x;
+        *out_y = sim->players[0].y;
+        return;
+    }
+    float dx0 = x - sim->players[0].x, dy0 = y - sim->players[0].y;
+    float dx1 = x - sim->players[1].x, dy1 = y - sim->players[1].y;
+    if (dx1 * dx1 + dy1 * dy1 < dx0 * dx0 + dy0 * dy0) {
+        *out_x = sim->players[1].x; *out_y = sim->players[1].y;
+    } else {
+        *out_x = sim->players[0].x; *out_y = sim->players[0].y;
+    }
+}
+
 // Aim is fully decoupled from movement: it points at the mouse cursor,
 // recomputed every tick regardless of whether the player is moving or firing.
 // Degenerate case (cursor exactly on the player) keeps the previous aim.
@@ -120,17 +141,19 @@ static void aim_q_to_vector(uint16_t q, float* out_dx, float* out_dy) {
 // aim_dx/aim_dy are derived from the quantized aim_q, never from the raw
 // cursor delta — that's what lets replay (which supplies aim_q directly)
 // reproduce a live run bit-for-bit.
-static void step_aim(Sim* sim) {
-    if (sim->input.use_aim_q) {
-        sim->aim_q = sim->input.aim_q;
+static void step_aim(Sim* sim, int pi) {
+    Player* p = &sim->players[pi];
+    const InputState* in = &sim->input[pi];
+    if (in->use_aim_q) {
+        p->aim_q = in->aim_q;
     } else {
-        float dx = sim->input.mouse_x - sim->player_x;
-        float dy = sim->input.mouse_y - sim->player_y;
+        float dx = in->mouse_x - p->x;
+        float dy = in->mouse_y - p->y;
         if (dx * dx + dy * dy > 1e-6f) {
-            sim->aim_q = radians_to_aim_q(atan2f(dy, dx));
+            p->aim_q = radians_to_aim_q(atan2f(dy, dx));
         }
     }
-    aim_q_to_vector(sim->aim_q, &sim->aim_dx, &sim->aim_dy);
+    aim_q_to_vector(p->aim_q, &p->aim_dx, &p->aim_dy);
 }
 
 // Clamps (x,y) into [min_x,max_x]x[min_y,max_y]; returns true if it was
@@ -145,20 +168,21 @@ static bool clamp_to_rect(float* x, float* y,
     return inside;
 }
 
-// Returns true if the confinement clamp had to move the player this tick —
-// i.e. an edge's true position reached where the player actually was. That
-// IS the crush condition (PRD §8.1): the same mechanism that keeps the
-// player "clamped inside the animated rect" is what detects the edge
-// catching up to a player who didn't move away in time.
+// Returns true if the confinement clamp had to move this player this tick —
+// i.e. an edge's true position reached where they actually were. That IS the
+// crush condition (PRD §8.1): the same mechanism that keeps a player "clamped
+// inside the animated rect" is what detects the edge catching up to a player
+// who didn't move away in time.
 //
 // Confinement is to the UNION of the playfield rect and the boss window
 // (when one exists): the two windows merge into one playable space wherever
-// they overlap, so the player can walk through the overlap into the boss's
+// they overlap, so a player can walk through the overlap into the boss's
 // room. Standing in the boss's room when its window jumps away (teleport —
-// telegraphed for 2 s) leaves the player outside both rects, which lands
-// here as a crush: fair, because the ghost outline warned them.
-static bool step_player(Sim* sim) {
-    uint32_t keys = sim->input.keys;
+// telegraphed for 2 s) leaves them outside both rects, which lands here as a
+// crush: fair, because the ghost outline warned them.
+static bool step_player(Sim* sim, int pi) {
+    Player* p = &sim->players[pi];
+    uint32_t keys = sim->input[pi].keys;
     float dx = 0.0f, dy = 0.0f;
     if (keys & KEY_LEFT)  dx -= 1.0f;
     if (keys & KEY_RIGHT) dx += 1.0f;
@@ -169,15 +193,15 @@ static bool step_player(Sim* sim) {
         float len = sqrtf(dx * dx + dy * dy);
         dx /= len;
         dy /= len;
-        sim->move_dx = dx;  // drives the keyboard-shoot fallback direction
-        sim->move_dy = dy;
+        p->move_dx = dx;  // drives the keyboard-shoot fallback direction
+        p->move_dy = dy;
 
         float speed = (keys & KEY_FOCUS) ? sim->player_focus_speed : sim->player_speed;
-        sim->player_x += dx * speed * SIM_DT;
-        sim->player_y += dy * speed * SIM_DT;
+        p->x += dx * speed * SIM_DT;
+        p->y += dy * speed * SIM_DT;
     }
 
-    float ax = sim->player_x, ay = sim->player_y;
+    float ax = p->x, ay = p->y;
     bool in_a = clamp_to_rect(&ax, &ay,
                                sim->edges[EDGE_LEFT].pos + PLAYER_HITBOX_R,
                                sim->edges[EDGE_RIGHT].pos - PLAYER_HITBOX_R,
@@ -185,7 +209,7 @@ static bool step_player(Sim* sim) {
                                sim->edges[EDGE_BOTTOM].pos - PLAYER_HITBOX_R);
 
     if (!in_a && sim->boss_win_active) {
-        float bx = sim->player_x, by = sim->player_y;
+        float bx = p->x, by = p->y;
         bool in_b = clamp_to_rect(&bx, &by,
                                    sim->boss_win_x + PLAYER_HITBOX_R,
                                    sim->boss_win_x + BOSS_WINDOW_W - PLAYER_HITBOX_R,
@@ -195,29 +219,44 @@ static bool step_player(Sim* sim) {
 
         // Outside both: crush. Land the player at whichever room's clamp
         // point is nearer to where they actually were.
-        float da = (ax - sim->player_x) * (ax - sim->player_x) + (ay - sim->player_y) * (ay - sim->player_y);
-        float db = (bx - sim->player_x) * (bx - sim->player_x) + (by - sim->player_y) * (by - sim->player_y);
-        if (db < da) { sim->player_x = bx; sim->player_y = by; }
-        else         { sim->player_x = ax; sim->player_y = ay; }
+        float da = (ax - p->x) * (ax - p->x) + (ay - p->y) * (ay - p->y);
+        float db = (bx - p->x) * (bx - p->x) + (by - p->y) * (by - p->y);
+        if (db < da) { p->x = bx; p->y = by; }
+        else         { p->x = ax; p->y = ay; }
         return true;
     }
 
-    sim->player_x = ax;
-    sim->player_y = ay;
+    p->x = ax;
+    p->y = ay;
     return !in_a;
 }
 
-static void player_hit(Sim* sim, bool reset_win) {
+// Center the ship(s); offset in co-op so they don't spawn stacked.
+static void respawn_players(Sim* sim) {
+    if (sim->player_count == 2) {
+        sim->players[0].x = INTERNAL_W * 0.5f - 30.0f;
+        sim->players[1].x = INTERNAL_W * 0.5f + 30.0f;
+        sim->players[0].y = sim->players[1].y = INTERNAL_H * 0.5f;
+    } else {
+        sim->players[0].x = INTERNAL_W * 0.5f;
+        sim->players[0].y = INTERNAL_H * 0.5f;
+    }
+}
+
+// Lives are a SHARED pool (co-op): any hit on either ship decrements the one
+// counter. reset_win (crush only, not bullet/contact hits) resets the shared
+// window and respawns every present ship.
+static void player_hit(Sim* sim, int pi, bool reset_win) {
+    Player* p = &sim->players[pi];
     sim->lives--;
-    sim->invuln_ticks = PLAYER_INVULN_TICKS;
-    sim->hit_flash = 1.0f;
+    p->invuln_ticks = PLAYER_INVULN_TICKS;
+    p->hit_flash = 1.0f;
     add_shake(sim, PLAYER_HIT_SHAKE);
     if (HITSTOP_PLAYER_HIT_TICKS > sim->hitstop_ticks) sim->hitstop_ticks = HITSTOP_PLAYER_HIT_TICKS;
 
     if (reset_win) {
         reset_window(sim, WINDOW_RESET_SCALE, sim->push_base);
-        sim->player_x = INTERNAL_W * 0.5f;
-        sim->player_y = INTERNAL_H * 0.5f;
+        respawn_players(sim);
     }
 
     if (sim->lives <= 0) {
@@ -227,7 +266,8 @@ static void player_hit(Sim* sim, bool reset_win) {
 
 // ------------------------------------------------------------- shooting --
 
-static void spawn_pshot_volley(Sim* sim, float dx, float dy) {
+static void spawn_pshot_volley(Sim* sim, int pi, float dx, float dy) {
+    const Player* p = &sim->players[pi];
     float perp_x = -dy, perp_y = dx;
     float vx = dx * PSHOT_SPEED, vy = dy * PSHOT_SPEED;
 
@@ -238,29 +278,31 @@ static void spawn_pshot_volley(Sim* sim, float dx, float dy) {
         float ox = perp_x * offset, oy = perp_y * offset;
 
         PShot* s = &sim->pshots[sim->pshot_count++];
-        s->x = sim->player_x + ox;
-        s->y = sim->player_y + oy;
+        s->x = p->x + ox;
+        s->y = p->y + oy;
         s->vx = vx;
         s->vy = vy;
         s->exited = false;
     }
 }
 
-static void step_shooting(Sim* sim) {
-    if (sim->shoot_cooldown_ticks > 0) sim->shoot_cooldown_ticks--;
-    if (sim->shoot_cooldown_ticks != 0) return;
+static void step_shooting(Sim* sim, int pi) {
+    Player* p = &sim->players[pi];
+    const InputState* in = &sim->input[pi];
+    if (p->shoot_cooldown_ticks > 0) p->shoot_cooldown_ticks--;
+    if (p->shoot_cooldown_ticks != 0) return;
 
     // Mouse is primary; KEY_SHOOT is the fallback kept alive because QNX
     // Screen pointer support is unverified on target (DESIGN_CHANGES.md §1).
     // Mouse fires toward the cursor, keyboard fires along last movement.
-    if (sim->input.mouse_down) {
-        spawn_pshot_volley(sim, sim->aim_dx, sim->aim_dy);
-    } else if (sim->input.keys & KEY_SHOOT) {
-        spawn_pshot_volley(sim, sim->move_dx, sim->move_dy);
+    if (in->mouse_down) {
+        spawn_pshot_volley(sim, pi, p->aim_dx, p->aim_dy);
+    } else if (in->keys & KEY_SHOOT) {
+        spawn_pshot_volley(sim, pi, p->move_dx, p->move_dy);
     } else {
         return;
     }
-    sim->shoot_cooldown_ticks = sim->fire_cooldown_ticks_base;
+    p->shoot_cooldown_ticks = sim->fire_cooldown_ticks_base;
 }
 
 static void try_push_edge(Sim* sim, int edge_idx, float outward_sign) {
@@ -355,8 +397,8 @@ static bool enemy_is_outside(const Sim* sim, const Enemy* e) {
     // vulnerability is decided by window overlap, not by the player's rect.
     if (e->type == ENEMY_SPIKER) return !sim->boss_vulnerable;
 
-    // "Inside" means inside the union of both windows: the player can stand
-    // in the boss's room, so an enemy that follows them there must stay live
+    // "Inside" means inside the union of both windows: a player can stand in
+    // the boss's room, so an enemy that follows them there must stay live
     // (vulnerable, bright, dealing contact damage) rather than going dim.
     bool in_player_win =
         e->x >= sim->edges[EDGE_LEFT].pos && e->x <= sim->edges[EDGE_RIGHT].pos &&
@@ -413,7 +455,9 @@ static void update_boss_window(Sim* sim) {
 }
 
 static void step_enemy_triangle(Sim* sim, Enemy* e) {
-    float dx = sim->player_x - e->x, dy = sim->player_y - e->y;
+    float px, py;
+    nearest_player_pos(sim, e->x, e->y, &px, &py);
+    float dx = px - e->x, dy = py - e->y;
     float dist = sqrtf(dx * dx + dy * dy);
     if (dist > 0.0001f) { dx /= dist; dy /= dist; } else { dx = 0.0f; dy = 0.0f; }
 
@@ -430,7 +474,9 @@ static void step_enemy_triangle(Sim* sim, Enemy* e) {
 static void step_enemy_circle(Sim* sim, Enemy* e) {
     switch (e->dash_state) {
         case CIRCLE_IDLE: {
-            float dx = sim->player_x - e->x, dy = sim->player_y - e->y;
+            float px, py;
+            nearest_player_pos(sim, e->x, e->y, &px, &py);
+            float dx = px - e->x, dy = py - e->y;
             float dist = sqrtf(dx * dx + dy * dy);
             if (dist > 0.0001f) { dx /= dist; dy /= dist; }
             e->x += dx * CIRCLE_APPROACH_SPEED * SIM_DT;
@@ -443,7 +489,9 @@ static void step_enemy_circle(Sim* sim, Enemy* e) {
         }
         case CIRCLE_WINDUP: {
             if (--e->dash_timer_ticks <= 0) {
-                float dx = sim->player_x - e->x, dy = sim->player_y - e->y;
+                float px, py;
+                nearest_player_pos(sim, e->x, e->y, &px, &py);
+                float dx = px - e->x, dy = py - e->y;
                 float dist = sqrtf(dx * dx + dy * dy);
                 if (dist < 0.0001f) { dx = 0.0f; dy = -1.0f; dist = 1.0f; }
                 dx /= dist;
@@ -476,7 +524,7 @@ static void spawn_bullet(Sim* sim, float x, float y, float vx, float vy) {
 }
 
 // Drifts to the nearest window edge, latches onto it like a limpet, then
-// fires aimed shots at the player on a timer (PRD §8.3).
+// fires aimed shots at the nearest player on a timer (PRD §8.3).
 static void step_enemy_octagon(Sim* sim, Enemy* e) {
     if (!e->latched) {
         float dl = fabsf(e->x - sim->edges[EDGE_LEFT].pos);
@@ -543,7 +591,9 @@ static void step_enemy_octagon(Sim* sim, Enemy* e) {
 
     if (--e->fire_timer_ticks <= 0) {
         e->fire_timer_ticks = OCTAGON_FIRE_INTERVAL_TICKS;
-        float dx = sim->player_x - e->x, dy = sim->player_y - e->y;
+        float px, py;
+        nearest_player_pos(sim, e->x, e->y, &px, &py);
+        float dx = px - e->x, dy = py - e->y;
         float dist = sqrtf(dx * dx + dy * dy);
         if (dist < 0.0001f) { dx = 0.0f; dy = 1.0f; dist = 1.0f; }
         spawn_bullet(sim, e->x, e->y,
@@ -591,20 +641,21 @@ static void spawn_blaster_volley(Sim* sim) {
         }
         if (!b) return;  // all in flight
 
-        // Somewhere on screen, but never right on top of the player — the
-        // telegraph must be dodgeable, and it can't be dodged from inside it.
-        float bx, by, dx, dy, d2;
+        // Somewhere on screen, but never right on top of the nearest player —
+        // the telegraph must be dodgeable, and it can't be dodged from inside it.
+        float bx, by, dx, dy, d2, px, py;
         int tries = 0;
         do {
             bx = rng_float01(&sim->rng) * INTERNAL_W;
             by = rng_float01(&sim->rng) * INTERNAL_H;
-            dx = bx - sim->player_x;
-            dy = by - sim->player_y;
+            nearest_player_pos(sim, bx, by, &px, &py);
+            dx = bx - px;
+            dy = by - py;
             d2 = dx * dx + dy * dy;
         } while (d2 < BLASTER_SPAWN_MIN_DIST * BLASTER_SPAWN_MIN_DIST && ++tries < 8);
 
-        // Lock onto where the player is NOW and never re-aim.
-        float adx = sim->player_x - bx, ady = sim->player_y - by;
+        // Lock onto where the nearest player is NOW and never re-aim.
+        float adx = px - bx, ady = py - by;
         float len = sqrtf(adx * adx + ady * ady);
         if (len < 0.0001f) { adx = 1.0f; ady = 0.0f; len = 1.0f; }
 
@@ -673,7 +724,9 @@ static void step_enemy_spiker(Sim* sim, Enemy* e) {
     switch (e->laser_state) {
         case SPIKER_LASER_IDLE:
             if (--e->laser_timer_ticks <= 0) {
-                float dx = sim->player_x - e->x, dy = sim->player_y - e->y;
+                float px, py;
+                nearest_player_pos(sim, e->x, e->y, &px, &py);
+                float dx = px - e->x, dy = py - e->y;
                 if (dx * dx + dy * dy < 0.0001f) { dx = 1.0f; dy = 0.0f; }
                 e->laser_angle = atan2f(dy, dx);
                 e->laser_state = SPIKER_LASER_TELEGRAPH;
@@ -818,11 +871,16 @@ static void spawn_enemy(Sim* sim, uint8_t type) {
     if (y < inset) y = inset;
     if (y > INTERNAL_H - inset) y = INTERNAL_H - inset;
 
+    // Co-op HP buff: two guns kill much faster than one (confirmed on real
+    // hardware — see BRINGUP_LOG.md). Applies to every type, including the
+    // Spiker's own HP_BASE/GROWTH scaling below.
+    float coop_hp_mult = (sim->player_count == 2) ? COOP_ENEMY_HP_MULT : 1.0f;
+
     Enemy* e = &sim->enemies[sim->enemy_count++];
     e->x = x;
     e->y = y;
     e->type = type;
-    e->hp = enemy_hp_max(type);
+    e->hp = enemy_hp_max(type) * coop_hp_mult;
     e->dash_state = CIRCLE_IDLE;
     e->dash_timer_ticks = CIRCLE_IDLE_TICKS;
     e->dash_vx = e->dash_vy = 0.0f;
@@ -848,7 +906,7 @@ static void spawn_enemy(Sim* sim, uint8_t type) {
         sim->blaster_timer_ticks = BLASTER_INTERVAL_TICKS;
         float hp = SPIKER_HP_BASE;
         for (int i = 1; i < sim->spiker_appearances; i++) hp *= SPIKER_HP_GROWTH;
-        e->hp = hp;
+        e->hp = hp * coop_hp_mult;
         e->fire_timer_ticks = SPIKER_RADIAL_INTERVAL_TICKS;
         e->hit_flash_ticks = 3;
         sim->spiker_alive = true;
@@ -867,9 +925,12 @@ static void begin_wave(Sim* sim, int wave_n) {
         return;
     }
 
-    int n_tri = 2 + wave_n / 2;
-    int n_cir = wave_n / 3;
-    int n_oct = (wave_n >= 3) ? wave_n / 4 : 0;
+    // Co-op bonus: two guns clear a wave roughly twice as fast, so pad the
+    // spawn set a bit (starting point for a feel pass, see COOP_SHRINK_MULT).
+    int bonus = (sim->player_count == 2) ? COOP_WAVE_BONUS : 0;
+    int n_tri = 2 + wave_n / 2 + bonus;
+    int n_cir = wave_n / 3 + bonus;
+    int n_oct = (wave_n >= 3) ? wave_n / 4 + bonus : 0;
     int total = n_tri + n_cir + n_oct;
     if (total > SPAWN_QUEUE_CAP) total = SPAWN_QUEUE_CAP;
 
@@ -941,52 +1002,49 @@ static void step_collisions(Sim* sim) {
         }
     }
 
-    if (sim->invuln_ticks <= 0) {
-        // Spiker laser x player (§8.4): point-to-segment distance, firing beams only
-        for (uint16_t bi = 0; bi < sim->beam_count; bi++) {
+    // The three hazard-vs-player checks below run PER PLAYER (co-op: each
+    // ship has its own invuln window), so a bullet grazing ship A can't block
+    // ship B taking damage from something else the same tick.
+    for (int pi = 0; pi < sim->player_count; pi++) {
+        Player* p = &sim->players[pi];
+        if (p->invuln_ticks > 0) continue;
+
+        bool hit = false;
+
+        // Spiker laser x this player (§8.4): point-to-segment distance, firing beams only
+        for (uint16_t bi = 0; bi < sim->beam_count && !hit; bi++) {
             const SnapBeam* beam = &sim->beams[bi];
             if (beam->state != 1u) continue;  // telegraph doesn't hurt
 
             float ex = cosf(beam->angle), ey = sinf(beam->angle);
-            float px = sim->player_x - beam->x, py = sim->player_y - beam->y;
+            float px = p->x - beam->x, py = p->y - beam->y;
             float t = px * ex + py * ey;               // projection onto the beam ray
             if (t < 0.0f) t = 0.0f;
             if (t > beam->len) t = beam->len;
             float cx = px - t * ex, cy = py - t * ey;  // perpendicular offset
             float r = beam->width * 0.5f + PLAYER_HITBOX_R;
-            if (cx * cx + cy * cy <= r * r) {
-                player_hit(sim, false);
-                break;
-            }
+            if (cx * cx + cy * cy <= r * r) hit = true;
         }
-    }
 
-    if (sim->invuln_ticks <= 0) {
-        // enemy bullets x player (§8.4)
-        for (uint16_t bi = 0; bi < sim->bullet_count; bi++) {
+        // enemy bullets x this player (§8.4)
+        for (uint16_t bi = 0; bi < sim->bullet_count && !hit; bi++) {
             const Bullet* b = &sim->bullets[bi];
             float r = ENEMY_BULLET_RADIUS + PLAYER_HITBOX_R;
-            float dx = sim->player_x - b->x, dy = sim->player_y - b->y;
-            if (dx * dx + dy * dy <= r * r) {
-                player_hit(sim, false);
-                break;
-            }
+            float dx = p->x - b->x, dy = p->y - b->y;
+            if (dx * dx + dy * dy <= r * r) hit = true;
         }
-    }
 
-    if (sim->invuln_ticks <= 0) {
-        // enemy body x player, contact damage (§8.4)
-        for (uint16_t ei = 0; ei < sim->enemy_count; ei++) {
+        // enemy body x this player, contact damage (§8.4)
+        for (uint16_t ei = 0; ei < sim->enemy_count && !hit; ei++) {
             Enemy* e = &sim->enemies[ei];
             if (!enemy_deals_contact_damage(e->type)) continue;
             if (enemy_is_outside(sim, e)) continue;
             float r = enemy_radius(e->type) + PLAYER_HITBOX_R;
-            float dx = sim->player_x - e->x, dy = sim->player_y - e->y;
-            if (dx * dx + dy * dy <= r * r) {
-                player_hit(sim, false);
-                break;
-            }
+            float dx = p->x - e->x, dy = p->y - e->y;
+            if (dx * dx + dy * dy <= r * r) hit = true;
         }
+
+        if (hit) player_hit(sim, pi, false);
     }
 }
 
@@ -1016,6 +1074,9 @@ static void begin_upgrade_state(Sim* sim) {
     sim->state = SIM_STATE_UPGRADE;
 }
 
+// Stat upgrades apply to the shared balance fields, so both ships benefit in
+// co-op (Wall Punch/Bulwark were already global — they tune the one shared
+// window).
 static void apply_upgrade(Sim* sim, uint8_t id) {
     switch (id) {
         case 0:  // Speed
@@ -1047,19 +1108,46 @@ static void apply_upgrade(Sim* sim, uint8_t id) {
 
 // ------------------------------------------------------- state machine --
 
+// "shoot was just pressed this tick" for player pi, from either trigger.
+static bool key_edge(const Sim* sim, int pi, uint32_t bit) {
+    return (sim->input[pi].keys & bit) && !(sim->prev_keys[pi] & bit);
+}
+
+static bool shoot_edge(const Sim* sim, int pi) {
+    bool k = key_edge(sim, pi, KEY_SHOOT);
+    bool c = sim->input[pi].mouse_down && !sim->prev_mouse_down[pi];
+    return k || c;
+}
+
+// UI states where either present player's input counts equally (upgrade
+// pick, restart) — used by step_upgrade_state and the restart check in
+// sim_step. NOT used by MODE_SELECT, which is deliberately player-0-only
+// (see step_mode_select): player_count/roles aren't decided yet there.
+static bool any_key_edge(const Sim* sim, uint32_t bit) {
+    for (int pi = 0; pi < sim->player_count; pi++) if (key_edge(sim, pi, bit)) return true;
+    return false;
+}
+
+static bool any_shoot_edge(const Sim* sim) {
+    for (int pi = 0; pi < sim->player_count; pi++) if (shoot_edge(sim, pi)) return true;
+    return false;
+}
+
 static void reset_common(Sim* sim) {
     reset_window(sim, 1.0f, WINDOW_PUSH_BASE_DEFAULT);
-    sim->player_x = INTERNAL_W * 0.5f;
-    sim->player_y = INTERNAL_H * 0.5f;
-    // default aim: straight up (screen y grows downward, so -tau/4)
-    sim->aim_q = radians_to_aim_q(-SIM_TAU * 0.25f);
-    aim_q_to_vector(sim->aim_q, &sim->aim_dx, &sim->aim_dy);
-    sim->move_dx = 0.0f;
-    sim->move_dy = -1.0f;  // keyboard-shoot fallback direction, default up
-    sim->shoot_cooldown_ticks = 0;
-    sim->invuln_ticks = 0;
+    respawn_players(sim);
+    for (int pi = 0; pi < 2; pi++) {
+        Player* p = &sim->players[pi];
+        // default aim: straight up (screen y grows downward, so -tau/4)
+        p->aim_q = radians_to_aim_q(-SIM_TAU * 0.25f);
+        aim_q_to_vector(p->aim_q, &p->aim_dx, &p->aim_dy);
+        p->move_dx = 0.0f;
+        p->move_dy = -1.0f;  // keyboard-shoot fallback direction, default up
+        p->shoot_cooldown_ticks = 0;
+        p->invuln_ticks = 0;
+        p->hit_flash = 0.0f;
+    }
     sim->hitstop_ticks = 0;
-    sim->hit_flash = 0.0f;
     sim->pshot_count = 0;
     sim->enemy_count = 0;
     sim->bullet_count = 0;
@@ -1082,7 +1170,7 @@ static void start_new_run(Sim* sim) {
     sim->player_focus_speed = PLAYER_FOCUS_SPEED_DEFAULT;
     sim->fire_cooldown_ticks_base = (int)(SIM_HZ / PSHOT_FIRE_HZ_DEFAULT);
     sim->multishot_count = PSHOT_MULTISHOT_DEFAULT;
-    sim->lives_max = LIVES_START;
+    sim->lives_max = (sim->player_count == 2) ? LIVES_START_COOP : LIVES_START;
     sim->push_base = WINDOW_PUSH_BASE_DEFAULT;
     sim->shrink_rate = WINDOW_SHRINK_RATE_DEFAULT;
 
@@ -1094,33 +1182,110 @@ static void start_new_run(Sim* sim) {
     sim->state = SIM_STATE_PLAY;
 }
 
-static void reset_to_menu(Sim* sim) {
+// R, from anywhere, always returns to the very first screen — never a
+// shortcut back into PLAY or even COLOR_SELECT. In multiplayer this also
+// implicitly drops the netplay connection (main.c tears the socket down when
+// it observes this transition; see netplay.c).
+static void reset_to_mode_select(Sim* sim) {
     reset_common(sim);
-    sim->state = SIM_STATE_MENU;
+    sim->player_count = 1;
+    sim->mode_sel_cursor = 0;  // SINGLE PLAYER
+    sim->net_role = NET_ROLE_NONE;
+    sim->state = SIM_STATE_MODE_SELECT;
 }
 
-// "shoot was just pressed this tick", from either trigger — used by the UI
-// states (start run, confirm upgrade) where a click and a keypress mean the
-// same thing.
-static bool shoot_pressed_edge(const Sim* sim) {
-    bool key_edge = (sim->input.keys & KEY_SHOOT) && !(sim->prev_keys & KEY_SHOOT);
-    bool click_edge = sim->input.mouse_down && !sim->prev_mouse_down;
-    return key_edge || click_edge;
+static void enter_color_select(Sim* sim) {
+    sim->color_sel[0] = 0;
+    sim->color_sel[1] = 1 % COLOR_COUNT;
+    sim->color_confirmed[0] = COLOR_UNCONFIRMED;
+    sim->color_confirmed[1] = COLOR_UNCONFIRMED;
+    sim->state = SIM_STATE_COLOR_SELECT;
 }
 
-static void step_menu(Sim* sim) {
-    if (shoot_pressed_edge(sim)) {
+// MODE_SELECT reads player 0's input ONLY — player_count/roles aren't decided
+// yet, so there's no "other player" to read from (a joiner is a different
+// machine entirely; see main.c/netplay.c for how JOIN eventually maps to
+// players[1]).
+static void step_mode_select(Sim* sim) {
+    if (key_edge(sim, 0, KEY_LEFT) || key_edge(sim, 0, KEY_UP)) {
+        sim->mode_sel_cursor = (uint8_t)((sim->mode_sel_cursor + 2) % 3);
+    }
+    if (key_edge(sim, 0, KEY_RIGHT) || key_edge(sim, 0, KEY_DOWN)) {
+        sim->mode_sel_cursor = (uint8_t)((sim->mode_sel_cursor + 1) % 3);
+    }
+    if (shoot_edge(sim, 0)) {
+        switch (sim->mode_sel_cursor) {
+            case 0:  // SINGLE PLAYER
+                sim->player_count = 1;
+                sim->net_role = NET_ROLE_NONE;
+                enter_color_select(sim);
+                break;
+            case 1:  // HOST GAME
+                sim->player_count = 2;
+                sim->net_role = NET_ROLE_HOST;
+                sim->state = SIM_STATE_WAITING_ROOM;
+                break;
+            default:  // JOIN GAME
+                sim->player_count = 2;
+                sim->net_role = NET_ROLE_JOIN;
+                sim->state = SIM_STATE_WAITING_ROOM;
+                break;
+        }
+    }
+}
+
+// Deliberately empty: WAITING_ROOM's real work (the handshake, and the
+// forced sim_init + jump to COLOR_SELECT once both sides are ready) is
+// driven from outside sim_step by netplay_service (see netplay.c/main.c),
+// which both the real game and tools/mp_check.c call around every tick.
+// sim.c only needs to sit here and let restart-from-anywhere (R) cancel it.
+static void step_waiting_room(Sim* sim) {
+    (void)sim;
+}
+
+// Duplicate-color prevention: a cursor skips the other player's already-
+// confirmed color, and a confirm on that color is simply ignored (the cursor
+// will have already stepped off it, so this is a defensive backstop).
+static void step_color_select(Sim* sim) {
+    for (int pi = 0; pi < sim->player_count; pi++) {
+        if (sim->color_confirmed[pi] != COLOR_UNCONFIRMED) continue;  // already locked in
+        int other = 1 - pi;
+        bool other_confirmed = sim->player_count == 2 && sim->color_confirmed[other] != COLOR_UNCONFIRMED;
+
+        int dir = 0;
+        if (key_edge(sim, pi, KEY_LEFT) || key_edge(sim, pi, KEY_UP)) dir = -1;
+        if (key_edge(sim, pi, KEY_RIGHT) || key_edge(sim, pi, KEY_DOWN)) dir = 1;
+        if (dir != 0) {
+            int c = sim->color_sel[pi];
+            for (int tries = 0; tries < COLOR_COUNT; tries++) {
+                c = (c + dir + COLOR_COUNT) % COLOR_COUNT;
+                if (!(other_confirmed && c == sim->color_confirmed[other])) break;
+            }
+            sim->color_sel[pi] = (uint8_t)c;
+        }
+
+        if (shoot_edge(sim, pi) && !(other_confirmed && sim->color_sel[pi] == sim->color_confirmed[other])) {
+            sim->color_confirmed[pi] = sim->color_sel[pi];
+        }
+    }
+
+    bool all_ready = true;
+    for (int pi = 0; pi < sim->player_count; pi++) {
+        if (sim->color_confirmed[pi] == COLOR_UNCONFIRMED) all_ready = false;
+    }
+
+    if (all_ready) {
+        for (int pi = 0; pi < sim->player_count; pi++) sim->player_color[pi] = sim->color_confirmed[pi];
         start_new_run(sim);
     }
 }
 
 static void step_upgrade_state(Sim* sim) {
-    uint32_t keys = sim->input.keys, prev = sim->prev_keys;
-    if ((keys & KEY_LEFT) && !(prev & KEY_LEFT)) sim->upgrade_selected = 0;
-    if ((keys & KEY_RIGHT) && !(prev & KEY_RIGHT)) sim->upgrade_selected = 1;
+    if (any_key_edge(sim, KEY_LEFT)) sim->upgrade_selected = 0;
+    if (any_key_edge(sim, KEY_RIGHT)) sim->upgrade_selected = 1;
 
     sim->upgrade_timer_ticks--;
-    bool confirmed = shoot_pressed_edge(sim) || sim->upgrade_timer_ticks <= 0;
+    bool confirmed = any_shoot_edge(sim) || sim->upgrade_timer_ticks <= 0;
     if (confirmed) {
         apply_upgrade(sim, sim->upgrade_selected == 0 ? sim->upgrade_a : sim->upgrade_b);
         sim->wave++;
@@ -1137,13 +1302,15 @@ static void step_play(Sim* sim) {
 
     step_window(sim);
 
-    bool crushed = step_player(sim);
-    if (crushed && sim->invuln_ticks <= 0) {
-        player_hit(sim, true);
+    for (int pi = 0; pi < sim->player_count; pi++) {
+        bool crushed = step_player(sim, pi);
+        if (crushed && sim->players[pi].invuln_ticks <= 0) player_hit(sim, pi, true);
     }
 
-    step_aim(sim);  // after movement: aim from the player's final position this tick
-    step_shooting(sim);
+    for (int pi = 0; pi < sim->player_count; pi++) {
+        step_aim(sim, pi);  // after movement: aim from this tick's final position
+        step_shooting(sim, pi);
+    }
     step_pshots(sim);
     step_spawn_queue(sim);
     step_enemies(sim);
@@ -1155,10 +1322,13 @@ static void step_play(Sim* sim) {
     step_bullets(sim);
     step_collisions(sim);
 
-    if (sim->invuln_ticks > 0) sim->invuln_ticks--;
-    if (sim->hit_flash > 0.0f) {
-        sim->hit_flash -= 0.1f;
-        if (sim->hit_flash < 0.0f) sim->hit_flash = 0.0f;
+    for (int pi = 0; pi < sim->player_count; pi++) {
+        Player* p = &sim->players[pi];
+        if (p->invuln_ticks > 0) p->invuln_ticks--;
+        if (p->hit_flash > 0.0f) {
+            p->hit_flash -= 0.1f;
+            if (p->hit_flash < 0.0f) p->hit_flash = 0.0f;
+        }
     }
 
     if (sim->state == SIM_STATE_PLAY &&
@@ -1178,14 +1348,16 @@ void sim_init(Sim* sim, uint64_t seed) {
     sim->tick = 0;
     sim->seed = seed;
     rng_seed(&sim->rng, seed);
-    sim->input.keys = 0;
-    // Start the cursor at screen center so the first tick's aim is
-    // well-defined even before any pointer motion arrives.
-    sim->input.mouse_x = INTERNAL_W * 0.5f;
-    sim->input.mouse_y = INTERNAL_H * 0.5f;
-    sim->input.mouse_down = false;
-    sim->prev_keys = 0;
-    sim->prev_mouse_down = false;
+    for (int pi = 0; pi < 2; pi++) {
+        sim->input[pi].keys = 0;
+        // Start the cursor at screen center so the first tick's aim is
+        // well-defined even before any pointer motion arrives.
+        sim->input[pi].mouse_x = INTERNAL_W * 0.5f;
+        sim->input[pi].mouse_y = INTERNAL_H * 0.5f;
+        sim->input[pi].mouse_down = false;
+        sim->prev_keys[pi] = 0;
+        sim->prev_mouse_down[pi] = false;
+    }
 
     sim->player_speed = PLAYER_SPEED_DEFAULT;
     sim->player_focus_speed = PLAYER_FOCUS_SPEED_DEFAULT;
@@ -1199,8 +1371,16 @@ void sim_init(Sim* sim, uint64_t seed) {
     sim->score = 0;
     sim->wave = 0;
 
+    sim->player_count = 1;
+    sim->mode_sel_cursor = 0;  // SINGLE PLAYER
+    sim->net_role = NET_ROLE_NONE;
+    sim->color_confirmed[0] = COLOR_UNCONFIRMED;
+    sim->color_confirmed[1] = COLOR_UNCONFIRMED;
+    sim->player_color[0] = 0;
+    sim->player_color[1] = 1 % COLOR_COUNT;  // placeholder defaults; COLOR_SELECT overwrites them
+
     reset_common(sim);
-    sim->state = SIM_STATE_MENU;
+    sim->state = SIM_STATE_MODE_SELECT;
 }
 
 void sim_start_at_wave(Sim* sim, int wave) {
@@ -1232,15 +1412,22 @@ void sim_start_stress(Sim* sim, int n) {
     sim->bullet_count = (uint16_t)n;
 }
 
-void sim_consume_input(Sim* sim, InputRing* ring) {
+void sim_begin_multiplayer_run(Sim* sim, uint64_t seed, uint8_t net_role) {
+    sim_init(sim, seed);
+    sim->player_count = 2;
+    sim->net_role = net_role;
+    enter_color_select(sim);
+}
+
+void sim_consume_input(Sim* sim, InputRing* ring, int local_idx) {
     InputFrame f;
     while (input_ring_pop(ring, &f)) {
-        sim->input.keys = f.keys;
-        sim->input.mouse_x = f.mouse_x;
-        sim->input.mouse_y = f.mouse_y;
-        sim->input.mouse_down = f.mouse_down;
-        sim->input.aim_q = f.aim_q;
-        sim->input.use_aim_q = f.use_aim_q;
+        sim->input[local_idx].keys = f.keys;
+        sim->input[local_idx].mouse_x = f.mouse_x;
+        sim->input[local_idx].mouse_y = f.mouse_y;
+        sim->input[local_idx].mouse_down = f.mouse_down;
+        sim->input[local_idx].aim_q = f.aim_q;
+        sim->input[local_idx].use_aim_q = f.use_aim_q;
     }
 }
 
@@ -1256,8 +1443,6 @@ uint64_t sim_hash(const Sim* sim) {
 
 void sim_step(Sim* sim) {
     sim->tick++;
-    uint32_t keys = sim->input.keys;
-    uint32_t prev = sim->prev_keys;
 
     if (sim->stress_mode) {
         // Bypass the mortal PLAY state machine entirely: the M3 perf test
@@ -1267,27 +1452,38 @@ void sim_step(Sim* sim) {
         // first time this ran on target. Pure bullet-bounce load instead,
         // runs indefinitely regardless of state.
         step_bullets(sim);
-        sim->prev_keys = keys;
-        sim->prev_mouse_down = sim->input.mouse_down;
+        for (int pi = 0; pi < 2; pi++) {
+            sim->prev_keys[pi] = sim->input[pi].keys;
+            sim->prev_mouse_down[pi] = sim->input[pi].mouse_down;
+        }
         return;
     }
 
-    bool restart_pressed = (keys & KEY_RESTART) && !(prev & KEY_RESTART);
+    // any_key_edge loops 0..player_count-1, which is exactly right here: in
+    // MODE_SELECT that's player 0 only (player_count is always 1 there); from
+    // WAITING_ROOM onward it's every present player, so either one can bail.
+    bool restart_pressed = any_key_edge(sim, KEY_RESTART);
 
     switch (sim->state) {
-        case SIM_STATE_MENU:    step_menu(sim); break;
-        case SIM_STATE_PLAY:    step_play(sim); break;
-        case SIM_STATE_UPGRADE: step_upgrade_state(sim); break;
-        case SIM_STATE_DEAD:    break;
+        case SIM_STATE_MODE_SELECT:  step_mode_select(sim);   break;
+        case SIM_STATE_WAITING_ROOM: step_waiting_room(sim);  break;
+        case SIM_STATE_COLOR_SELECT: step_color_select(sim);  break;
+        case SIM_STATE_PLAY:         step_play(sim);          break;
+        case SIM_STATE_UPGRADE:      step_upgrade_state(sim); break;
+        case SIM_STATE_DEAD:         break;
         default: break;
     }
 
-    if (restart_pressed && sim->state != SIM_STATE_MENU) {
-        reset_to_menu(sim);
+    // R always returns to the very first screen — never a shortcut back into
+    // PLAY or even COLOR_SELECT (see reset_to_mode_select).
+    if (restart_pressed && sim->state != SIM_STATE_MODE_SELECT) {
+        reset_to_mode_select(sim);
     }
 
-    sim->prev_keys = keys;
-    sim->prev_mouse_down = sim->input.mouse_down;
+    for (int pi = 0; pi < 2; pi++) {
+        sim->prev_keys[pi] = sim->input[pi].keys;
+        sim->prev_mouse_down[pi] = sim->input[pi].mouse_down;
+    }
 }
 
 void sim_publish(const Sim* sim, SnapshotBuffer* sb) {
@@ -1325,11 +1521,17 @@ void sim_publish(const Sim* sim, SnapshotBuffer* sb) {
     snap->boss_tp_y = sim->boss_tp_y;
     snap->boss_tp_progress = sim->boss_tp_progress;
 
-    snap->player.x = sim->player_x;
-    snap->player.y = sim->player_y;
+    snap->player.x = sim->players[0].x;
+    snap->player.y = sim->players[0].y;
     snap->player.sprite = 0;
-    snap->player.flags = (sim->invuln_ticks > 0) ? 2u : 0u;  // invuln_blink
+    snap->player.flags = (sim->players[0].invuln_ticks > 0) ? 2u : 0u;  // invuln_blink
     snap->player.age = 0;  // only bullets use age (spawn pop)
+
+    snap->player2.x = sim->players[1].x;
+    snap->player2.y = sim->players[1].y;
+    snap->player2.sprite = 0;
+    snap->player2.flags = (sim->players[1].invuln_ticks > 0) ? 2u : 0u;
+    snap->player2.age = 0;
 
     uint16_t np = sim->pshot_count;
     for (uint16_t i = 0; i < np; i++) {
@@ -1381,9 +1583,20 @@ void sim_publish(const Sim* sim, SnapshotBuffer* sb) {
     snap->upgrade_b = sim->upgrade_b;
     snap->upgrade_selected = (uint8_t)sim->upgrade_selected;
 
-    snap->hit_flash = sim->hit_flash;
+    snap->hit_flash = sim->players[0].hit_flash;
+    snap->hit_flash2 = sim->players[1].hit_flash;
     snap->shake_x = sim->shake_x;
     snap->shake_y = sim->shake_y;
+
+    snap->player_count = sim->player_count;
+    snap->mode_sel_cursor = sim->mode_sel_cursor;
+    snap->net_role = sim->net_role;
+    snap->color_sel[0] = sim->color_sel[0];
+    snap->color_sel[1] = sim->color_sel[1];
+    snap->color_confirmed[0] = sim->color_confirmed[0];
+    snap->color_confirmed[1] = sim->color_confirmed[1];
+    snap->player_color[0] = sim->player_color[0];
+    snap->player_color[1] = sim->player_color[1];
 
     snapshot_publish(sb);
 }

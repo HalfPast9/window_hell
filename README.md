@@ -12,8 +12,10 @@ QNX engineers judging it.
 
 *Status: M0–M3 complete (M3 — Pi first contact — verified on real Raspberry
 Pi 5 hardware). M4/M5 content (enemies, waves, upgrades, Spiker boss, replay)
-is also built and verified; see `BRINGUP_LOG.md` for full milestone history
-and live bring-up notes.*
+is also built and verified. Co-op multiplayer (see below) is built and
+verified on the dev box — two-Pi direct-cable bring-up hasn't started yet
+(hardware is offline); see `BRINGUP_LOG.md` for full milestone history and
+live bring-up notes.*
 
 ## Architecture
 
@@ -65,6 +67,11 @@ regression test.
 
 ## The game
 
+The front end is `MODE SELECT -> [WAITING ROOM, multiplayer only] ->
+CHOOSE YOUR SHIP -> play`. Arrows/WASD navigate, shoot (mouse or `J`/`Z`)
+confirms. `R` always returns to `MODE SELECT` — from anywhere, including
+mid-run — never a shortcut back into play.
+
 Move with arrows/WASD, hold `J`/`Z` to shoot two parallel streams, `K`/`X` to
 focus-move (slower, precise). The window creeps inward every tick; a bullet
 stream that exits through an edge pops that edge back outward. Shoot inward
@@ -75,8 +82,41 @@ carrying **its own window** — push your walls out until the two windows touch
 and they merge into one room you can walk through; only then can it be hurt.
 It telegraphs its escape teleport with a ghost outline of where its window
 will jump, so don't be standing in its half when the floor leaves. Kill it
-for a pick-2 upgrade. Three lives; an edge (or the void) that reaches you
-costs one.
+for a pick-2 upgrade. Three lives solo (four, shared, in co-op); an edge (or
+the void) that reaches a ship costs one.
+
+## Multiplayer
+
+Two-player co-op in one shared window: two ships, one arena, one shared lives
+pool, one shared upgrade pick per wave. `MODE SELECT` offers **HOST GAME** /
+**JOIN GAME** alongside single player; picking either drops into a
+`WAITING ROOM` (`R` cancels) until a peer is found, then both machines land on
+an identical, synchronized `CHOOSE YOUR SHIP` screen together.
+
+**Architecture:** lockstep, not client/server. The sim is already a pure
+function of `(seed, per-tick input)` — `replaycheck` proves it bit-identical
+across Linux/QNX-x86/QNX-aarch64. Two identical binaries fed identical input
+therefore produce identical states, so co-op is "both machines run the full
+sim; exchange only each tick's ~20-byte input packet" — a replay streamed
+live instead of read from disk. Local input is buffered 4 ticks
+(`NET_INPUT_DELAY_DEFAULT`, ~16.7 ms) before use, hiding the direct-cable's
+sub-millisecond RTT completely; a tick only steps once both sides' input for
+it is in hand. Every second, each side stamps a full-state hash into its
+packets — the peer compares it against its own hash for that same tick, and
+the in-game HUD's `NET HOST/JOIN D4 STALL n SYNC OK` line reports the result
+live (see `src/netplay.h` for the full protocol comment).
+
+**Verified so far (dev box only — see BRINGUP_LOG.md):** `make mp-check`
+(the multiplayer analogue of `replaycheck`, over real loopback UDP, nothing
+mocked) passes with 0 stalls and matching hashes; two live processes on
+loopback reach a synchronized game with pixel-identical enemy positions on
+both screens; killing one side correctly flips the other's HUD to
+`PEER LOST` within 2 s. **Not yet done:** running any of this on the actual
+two-Pi direct ethernet link — that bring-up hasn't started (hardware is
+offline). `--mp-host` / `--mp-join <ip>` / `--mp-port <port>` pre-fill the
+front end for scripted launches (`deploy.sh`); interactive play never needs
+them. F2/F3 (replay record/playback) are single-player only — the on-disk
+format is one input stream, not two.
 
 ## Controls
 
@@ -111,7 +151,12 @@ TARGET_IP=<pi-ip> ./deploy.sh   # ssh/scp as qnxuser, no root; see BRINGUP_LOG.m
 
 `make qnx-x86` builds for the QNX x86_64 VM (bring-up smoke test before Pi
 access). `make all` builds both Linux and QNX targets so cross-compile
-breakage is caught immediately.
+breakage is caught immediately. Both QNX targets currently cross-compile
+clean (`-Wall -Wextra`, zero warnings) but haven't been *run* on target since
+the co-op work landed — no Pi access right now (see BRINGUP_LOG.md).
+
+`make mp-check` runs the multiplayer determinism CI (real loopback UDP, see
+Multiplayer above) — the co-op analogue of `make replaycheck`.
 
 ## Credits
 

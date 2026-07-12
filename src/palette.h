@@ -20,6 +20,19 @@ static const RGBA PALETTE_SPIKER_CORE   = { 1.000000f, 0.364706f, 0.635294f, 1.0
 static const RGBA PALETTE_SPIKER_POINTS = { 1.0f,       1.0f,       1.0f,      1.0f }; // #FFFFFF
 static const RGBA PALETTE_HUD_TEXT      = { 0.486275f, 1.000000f, 0.690196f, 1.0f }; // #7CFFB0
 
+// Ship color picker (COLOR_SELECT, snapshot.h's COLOR_COUNT/player_color).
+// Index 0 matches the original single-player PALETTE_PLAYER white, so a
+// solo run that never touches the picker still nets the classic look.
+// Chosen to stay clear of every enemy/bullet/danger color above.
+#define SHIP_COLOR_COUNT 5
+static const RGBA PALETTE_SHIP_COLORS[SHIP_COLOR_COUNT] = {
+    { 1.000000f, 1.000000f, 1.000000f, 1.0f },  // 0: white  #FFFFFF (classic)
+    { 1.000000f, 0.596078f, 0.219608f, 1.0f },  // 1: orange #FF9838
+    { 0.298039f, 1.000000f, 0.627451f, 1.0f },  // 2: mint   #4CFFA0
+    { 0.725490f, 0.549020f, 1.000000f, 1.0f },  // 3: violet #B98CFF
+    { 0.431373f, 0.611765f, 1.000000f, 1.0f },  // 4: peri   #6E9CFF
+};
+
 // Enemy-outside-window: tint x 0.30, desaturate (PRD §7.0). Applied at draw
 // time in render.c since it's a transform on another entity's color, not a
 // fixed value.

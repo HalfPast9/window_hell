@@ -42,12 +42,22 @@ typedef struct {
     float danger;              // 0..1 telegraph: border cyan->red + pulse rate
     float edge_flash[4];       // L,R,T,B white-flash intensity 0..1 on push
 
-    // boss window (Spiker only). Fixed size, rides the boss's teleports. The
-    // boss is vulnerable only while this rect overlaps the playfield rect —
-    // pushing your walls out to reach it IS how you damage it.
+    // boss window (Spiker only). Fixed size, rides the boss's teleports. While
+    // it overlaps the playfield rect the two windows MERGE into one playable
+    // space (boss_vulnerable doubles as the "merged" flag): the renderer opens
+    // the border where the rects cross, and the sim lets the player walk
+    // through into the boss's room. Pushing your walls out to reach it IS how
+    // you damage it.
     float   boss_win_x, boss_win_y, boss_win_w, boss_win_h;
     uint8_t boss_win_active;
     uint8_t boss_vulnerable;
+
+    // teleport telegraph: ghost outline of where the boss window is about to
+    // jump. Drawn for the whole telegraph so a player inside the boss's room
+    // has warning to leave before the floor vanishes.
+    uint8_t boss_tp_active;
+    float   boss_tp_x, boss_tp_y;      // destination (boss center)
+    float   boss_tp_progress;          // 0..1 through the telegraph
 
     // entities
     SnapEntity player;

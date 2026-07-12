@@ -1,6 +1,6 @@
 .PHONY: all linux qnx qnx-x86 deploy replaycheck balance-probe clean
 
-SRC_COMMON := src/main.c src/sim.c src/metrics.c src/render.c src/hud.c src/replay.c
+SRC_COMMON := src/main.c src/sim.c src/metrics.c src/render.c src/hud.c src/replay.c src/handtrack.c
 
 BIN_DIR := bin
 
@@ -23,7 +23,7 @@ $(LINUX_BIN): $(LINUX_SRC) src/platform.h | $(BIN_DIR)
 # (that script exports QNX_HOST/QNX_TARGET, never QNX_SDP — guard on QNX_HOST)
 QNX_CC        := qcc -Vgcc_ntoaarch64le
 QNX_CFLAGS    := -std=c11 -O2 -g -Wall -Wextra
-QNX_LIBS      := -lscreen -lEGL -lGLESv2 -lm
+QNX_LIBS      := -lscreen -lEGL -lGLESv2 -lm -lsocket
 QNX_SRC       := $(SRC_COMMON) src/platform_qnx.c
 QNX_BIN       := $(BIN_DIR)/windowed-hell-qnx
 

@@ -70,8 +70,13 @@ focus-move (slower, precise). The window creeps inward every tick; a bullet
 stream that exits through an edge pops that edge back outward. Shoot inward
 to kill enemies, shoot outward to reclaim room — you can't do both at once,
 and that tension is the entire game. Enemies (Triangle, Circle, Octagon) come
-from Windowkill v1's roster on purpose; kill the Spiker boss every 5th wave
-for a pick-2 upgrade. Three lives; an edge that reaches you costs one.
+from Windowkill v1's roster on purpose; every 5th wave the Spiker boss arrives
+carrying **its own window** — push your walls out until the two windows touch
+and they merge into one room you can walk through; only then can it be hurt.
+It telegraphs its escape teleport with a ghost outline of where its window
+will jump, so don't be standing in its half when the floor leaves. Kill it
+for a pick-2 upgrade. Three lives; an edge (or the void) that reaches you
+costs one.
 
 ## Controls
 
@@ -114,9 +119,10 @@ breakage is caught immediately.
   are from **Windowkill** by torcado — borrowed on purpose; the fidelity is
   the homage. This build does not claim originality of the mechanic.
 - Deliberate divergences from Windowkill: enemies caught outside the shrunken
-  window are invulnerable (rather than just off-screen), and the roguelike
+  window are invulnerable (rather than just off-screen), the roguelike
   layer is a pick-2-of-6 upgrade choice between waves instead of a coin/Star
-  Shop.
+  Shop, and the Spiker boss carries its own window that merges with yours on
+  contact (reaching it by pushing your walls outward is the fight).
 - 8×8 bitmap font: public domain (`tools/font8x8.h`).
 
 See `BRINGUP_LOG.md` for QNX/Pi bring-up notes and `PRD.md` for the full spec

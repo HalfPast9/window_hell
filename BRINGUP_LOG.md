@@ -2,6 +2,93 @@
 
 Timestamped notes on every QNX/Pi/toolchain gotcha encountered. Newest entries at top.
 
+## 2026-07-12 — Camera-based hand-tracking abandoned; reverted to keyboard+mouse
+
+Explored camera bring-up (Pi Camera Module 3 / imx708 via the QNX Sensor
+Framework), an on-device MediaPipe tracker, and a live debug-overlay
+viewer as a path to hand-based control. The camera hardware available for
+this Pi wasn't workable for what the game needs, so the whole camera path
+is reverted — all camera-specific code (`tools/camera_probe.c`,
+`tracker/`, associated Makefile targets, staged QNX camera headers/libs)
+has been removed and the corresponding bring-up log entries scrubbed.
+`src/handtrack.c`/`src/handtrack.h` (the game's UDP control-input
+receiver) and `tools/handtrack_fake_sender.py` are kept — that layer is
+generic (any control source can feed it, camera or otherwise) and fully
+verified independent of the camera. `make linux`, `make qnx`, and `make
+replaycheck` all confirmed green after the revert. Game is back to
+keyboard+mouse as the primary, verified control scheme.
+
+## 2026-07-12 — Hand-tracking pivot, Phase 0: game-side receiver + protocol
+
+Kicking off the mouse+keyboard → camera hand-tracking pivot. Phase 0 is the
+control-input plumbing on the game side: a UDP receiver (`src/handtrack.c`)
+that folds a synthetic or real tracker's output into the exact same
+`InputFrame` keyboard/mouse already use, so the sim never knows or cares
+where its input came from. No camera or model work yet — this phase is
+buildable and fully testable without either, via a stdlib-only Python fake
+sender (`tools/handtrack_fake_sender.py --selftest`).
+
+**Design:** left-hand-style palm delta and right-hand-style aim angle ride
+in a 16-byte packet (`HtPacket`) at ~20-30 Hz; `ht_merge()` runs on the
+render thread (between `plat_poll` and `input_ring_push`, preserving the
+`InputRing`'s single-producer contract), applies per-axis hysteresis
+(press ≥0.35, release ≤0.20) to quantize the analog move vector down to the
+existing `KEY_UP/DOWN/LEFT/RIGHT` bits, and OR-merges everything with live
+keyboard/mouse — a held key always overrides/backs up a dead or absent
+tracker. A 250ms packet-staleness timeout clears all hand state
+automatically. Aim rides through the sim's existing `aim_q`/`use_aim_q`
+path (built for replay, sim.c `step_aim`), so no sim.c changes were needed
+at all.
+
+**Bug found and fixed:** `main.c` had `args->sim->input.use_aim_q = false;`
+hardcoded every sim tick (originally there just to scrub a finished
+replay's aim). Left in place, it would have silently discarded every live
+hand-tracker aim packet — the sim would never see `use_aim_q=true` outside
+of active replay playback. Fixed by moving that clear into the
+playback-just-ended branch only; live frames now carry whatever
+`use_aim_q` the render thread actually set (false for keyboard/mouse-only,
+true when `ht_merge` supplied a valid aim). `make replaycheck` stayed green
+after the change (hash A/B/C all matched, confirming determinism and
+replay-bit-identity were untouched).
+
+**QNX portability gotcha:** `src/handtrack.c` initially triggered
+`implicit declaration of function 'fcntl'`/`'close'` warnings under
+`qcc -std=c11` — QNX's headers don't expose POSIX prototypes under strict
+ISO C11 without a feature-test macro. Fixed the same way `main.c` already
+does: `#define _POSIX_C_SOURCE 200809L` before any includes. Also needed
+`-lsocket` added to `QNX_LIBS` in the Makefile (Linux's libc needs no extra
+link flag for BSD sockets; QNX does).
+
+**Build verification:** `make linux`, `make qnx` (aarch64, via
+`qcc -Vgcc_ntoaarch64le` cross-compiled from this Windows dev box after
+`source qnxsdp-env.sh`), and `make replaycheck` all compile clean with zero
+warnings. Note for future QNX work on this box: source `qnxsdp-env.sh`
+directly from Git Bash/MSYS (not via `qnxsdp-env.bat`/Cygwin) — `uname -s`
+under MSYS doesn't match `Linux`, so the script correctly falls through to
+the `host/win64/x86_64` toolchain path, and `qcc`/`make` behave as plain
+Windows console tools with no Cygwin path-dialect issues (that issue is
+specific to `mkqnximage`, which shells out to QNX's bundled Cygwin — see
+the QNX-VM bring-up notes).
+
+**Functional verification (Linux, headless via WSL/WSLg):**
+`windowed-hell-linux --handtrack` with no sender connected runs and shuts
+down cleanly (keyboard/mouse-only fallback, no CPU spin, no crash).
+With `tools/handtrack_fake_sender.py --selftest` driving a synthetic
+compass-sweep move vector, a full-turn rotating aim angle, and a 1s-on/1s-
+off shoot pulse at 20-30 Hz: `WH_HTDEBUG=1` confirmed every packet decoded
+correctly (monotonic `seq`, move/aim/button values matching the sender's
+synthesized values) and packets stopped cleanly the instant the sender was
+killed (silent staleness fallback — no more debug lines emitted, by
+design). Drove a full F2 (record) → F3 (replay) round-trip via `xdotool`
+while the fake sender fed hand input: 91 records captured, replay loaded
+and played back successfully through the same code path keyboard-driven
+replays already use.
+
+**Not yet done:** actual QNX-target run of `--handtrack` (needs the Pi
+powered on; deferred to when Phase 1/2 work touches the Pi directly), and
+a real camera/tracker — this phase only proves the receiver/protocol/merge
+logic end-to-end with a synthetic sender.
+
 ## 2026-07-11 — M3: Pi first contact (RPi5, not RPi4B — hardware landed as a Pi 5)
 
 Hardware finally arrived: **Raspberry Pi 5** (the PRD assumed a 4B; QNX image

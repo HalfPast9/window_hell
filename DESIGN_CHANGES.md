@@ -270,3 +270,62 @@ balance)** work, not new milestone content. Proposed sequencing:
 
 Not proposing new milestone numbers (M4.5, etc.) — this is corrective work on
 M2/M4, cleanest to just treat as "finish M4 properly" before M5 starts.
+
+---
+
+# Design change — boss windows MERGE instead of overlapping (2026-07-11)
+
+**Status:** CONFIRMED and implemented. Full merge (gameplay, not just visual),
+with the boss's teleport telegraphed to keep the merge fair.
+
+The Spiker's own window used to render as a second, independent picture frame
+drawn on top of the player's — two overlapping rectangles, each with a full
+border. Now the two windows **join into one space when they overlap**, the
+Windowkill read: the border opens where the rects cross, and the union becomes
+one playable room.
+
+## What changed
+
+- **Confinement is the union** (`step_player`): the player can walk through
+  the overlap into the boss's room. Crush fires only if the clamp finds the
+  player outside *both* rects. When separated, behavior is exactly as before.
+- **`enemy_is_outside` keys on the union** too. An enemy that chases the
+  player into the boss's room stays live (bright, vulnerable, contact-dangerous)
+  instead of nonsensically going dim while sharing a room with you.
+- **Teleport is telegraphed** (2 s, `SPIKER_TP_TELEGRAPH_TICKS`): the
+  destination is committed the moment the damage threshold is crossed and
+  published as a ghost — a dashed outline of the boss window plus a dim boss
+  silhouette at the destination, brightening as the blink approaches. Then the
+  boss (and its floor) jumps. Chosen over instant teleport specifically
+  because a player standing in the boss's room when it leaves is suddenly in
+  the void — that lands as a **crush** through the ordinary confinement path
+  (no special case), and the ghost is what makes that death fair rather than
+  cheap. The game's telegraph-everything language (laser lock, blaster spawn
+  distance) extends to the boss's escape.
+- **Renderer draws the union outline** (`draw_window_frame` + interval-cut
+  strip helpers): border/glow segments that would pass through the other
+  rect's interior are cut out — pure 1-D interval subtraction, still nothing
+  but axis-aligned quads (§7.1 holds). Each room keeps its own border color
+  (cyan/danger for yours, pink — pulsing white when merged — for the boss's),
+  so the joined shape still reads as two windows docked together. Fills:
+  the boss fill is drawn minus the overlap, so the boss-only region stays
+  faintly warmer — "his half" of the joined room. Both scissored entity
+  passes now draw *all* world entities (player included — they can be
+  standing in either room); overlap double-draws are opaque, so idempotent.
+
+## Consequences worth knowing
+
+- Fully-contained boss room (typical at spawn: the boss arrives centered on
+  the player's window, which is much bigger) = every boss border segment is
+  cut = no visible boss frame at all. Intended: fully merged is just "one
+  window". Its outline emerges as the shrinking player window exposes it.
+- If the shrinking player window separates from the boss room while the
+  player is inside the boss's half, the player is simply confined to the
+  boss room until it teleports (ghost gives 2 s warning to be crushed or
+  not). Coherent, dramatic, and rare — left as-is.
+- `make replaycheck` re-verified after the sim changes (hash changed with the
+  `Sim` struct layout — expected; the check is self-consistent). Verified
+  behaviorally with a headless white-box probe (spawn-merged, union
+  movement, live-in-boss-room enemies, telegraph→blink, stranding-crush) and
+  visually with an offscreen EGL-pbuffer render of the three states
+  (merged / ghost / separated).

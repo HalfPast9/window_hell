@@ -143,11 +143,21 @@ enum { CIRCLE_IDLE = 0, CIRCLE_WINDUP = 1, CIRCLE_DASHING = 2 };
 #define BLASTER_SPAWN_MIN_DIST 180.0f       // never materializes on top of the player
 
 // Teleports once it has taken this much cumulative damage since the last blink.
+// The blink is TELEGRAPHED: the destination is picked immediately and shown as
+// a ghost outline for the whole telegraph, then the boss (and its window)
+// jumps. That warning is what makes the merge mechanic fair — a player
+// standing in the boss's room has time to get out before the floor vanishes
+// from under them (staying anyway is a crush, same as any void exposure).
 #define SPIKER_TELEPORT_DAMAGE 12.0f
 #define SPIKER_TELEPORT_SHAKE 5.0f
+#define SPIKER_TP_TELEGRAPH_TICKS (int)(2.0f * SIM_HZ)
+
+enum { SPIKER_TP_NONE = 0, SPIKER_TP_TELEGRAPH = 1 };
 
 // The boss carries its own window. It teleports anywhere on screen; you reach
-// it by pushing YOUR walls out until the two rects overlap — only then is it
+// it by pushing YOUR walls out until the two rects overlap. When they overlap
+// the two windows MERGE into one playable space: the border opens where they
+// cross, the player can walk through into the boss's room, and the boss is
 // vulnerable. Fixed size, never shrinks, can't be pushed.
 #define BOSS_WINDOW_W 300.0f
 #define BOSS_WINDOW_H 220.0f
@@ -220,9 +230,12 @@ typedef struct {
     // Spiker only
     uint8_t laser_state;          // SPIKER_LASER_*
     int     laser_timer_ticks;    // counts down within the current laser phase
-    float   laser_angle;          // current beam angle (sweeps while firing)
+    float   laser_angle;          // beam angle, locked at telegraph start
     int     spiker_wave_counter;  // attacks speed up as this climbs
-    float   damage_since_blink;   // teleports once this crosses the threshold
+    float   damage_since_blink;   // telegraphs a teleport once this crosses the threshold
+    uint8_t tp_state;             // SPIKER_TP_*
+    int     tp_timer_ticks;       // counts down through the teleport telegraph
+    float   tp_dest_x, tp_dest_y; // destination, picked when the telegraph starts
     int     hit_flash_ticks;
 } Enemy;
 
@@ -299,7 +312,12 @@ typedef struct {
     // Boss window: derived from the live Spiker's position each tick.
     float boss_win_x, boss_win_y;   // top-left
     bool  boss_win_active;
-    bool  boss_vulnerable;          // true iff boss rect overlaps the player rect
+    bool  boss_vulnerable;          // true iff boss rect overlaps the player rect (windows merged)
+
+    // Teleport-telegraph ghost, derived from the live Spiker each tick.
+    bool  boss_tp_active;
+    float boss_tp_x, boss_tp_y;     // destination (boss center)
+    float boss_tp_progress;         // 0..1 through the telegraph
 
     SpawnQueueItem spawn_queue[SPAWN_QUEUE_CAP];
     int spawn_queue_count;

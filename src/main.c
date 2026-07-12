@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "handtrack.h"
 #include "hud.h"
 #include "input_ring.h"
 #include "metrics.h"
@@ -71,7 +72,6 @@ static void* sim_thread_main(void* arg_ptr) {
         // Always drain the ring so it can't back up, then let the replay log
         // override the input if we're playing one back.
         sim_consume_input(args->sim, args->input_ring);
-        args->sim->input.use_aim_q = false;
 
         if (playing) {
             uint16_t keys16, aim_q;
@@ -81,7 +81,8 @@ static void* sim_thread_main(void* arg_ptr) {
                 args->sim->input.aim_q = aim_q;
                 args->sim->input.use_aim_q = true;  // aim from the log, not a cursor
             } else {
-                playing = false;  // log exhausted; hand control back to the player
+                playing = false;  // log exhausted; stop forcing the log's aim,
+                args->sim->input.use_aim_q = false;  // hand control back to live input
             }
         }
 
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
     const char* replay_path = NULL;
     int start_wave = 0;  // 0 = normal (start at the menu)
     int stress_n = 0;    // 0 = disabled; see PRD §10 M3 acceptance test
+    int handtrack_port = 0;  // 0 = disabled
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -133,7 +135,13 @@ int main(int argc, char** argv) {
             start_wave = atoi(argv[++i]);  // dev/demo: jump to a wave (5, 10, ... = boss)
         } else if (strcmp(argv[i], "--stress") == 0 && i + 1 < argc) {
             stress_n = atoi(argv[++i]);  // dev/demo: N bouncing bullets, perf stress test
+        } else if (strcmp(argv[i], "--handtrack") == 0) {
+            handtrack_port = HT_PORT_DEFAULT;
+            if (i + 1 < argc && atoi(argv[i + 1]) > 0) handtrack_port = atoi(argv[++i]);
         }
+    }
+    if (handtrack_port == 0 && getenv("WH_HANDTRACK")) {
+        handtrack_port = HT_PORT_DEFAULT;  // deploy.sh passes no args; env enables it there
     }
     signal(SIGINT, handle_sigint);
 
@@ -150,6 +158,14 @@ int main(int argc, char** argv) {
 
     glViewport(0, 0, win.width, win.height);
     glClearColor(PALETTE_VOID.r, PALETTE_VOID.g, PALETTE_VOID.b, PALETTE_VOID.a);
+
+    HtState ht = {0};
+    ht.fd = -1;
+    if (handtrack_port) {
+        if (!ht_init(&ht, (uint16_t)handtrack_port)) {
+            fprintf(stderr, "main: handtrack disabled (bind failed); continuing keyboard-only\n");
+        }
+    }
 
     Sim sim;
     sim_init(&sim, seed);
@@ -229,14 +245,17 @@ int main(int argc, char** argv) {
         uint64_t frame_start = plat_time_ns();
 
         plat_poll(&win, &input);
-        input_ring_push(&input_ring, (InputFrame){
+        InputFrame frame = {
             .keys = input.keys,
             .mouse_x = input.mouse_x,
             .mouse_y = input.mouse_y,
             .mouse_down = input.mouse_down,
-            .use_aim_q = false,  // live input: sim derives aim from the cursor
+            .use_aim_q = false,  // live input: sim derives aim from the cursor,
+                                  // unless ht_merge below supplies a hand aim_q
             .tick = 0,
-        });
+        };
+        if (ht.fd >= 0) ht_merge(&ht, &frame, frame_start);
+        input_ring_push(&input_ring, frame);
 
         if ((input.keys & KEY_HUD) && !(prev_keys & KEY_HUD)) {
             hud_visible = !hud_visible;
@@ -277,6 +296,28 @@ int main(int argc, char** argv) {
         SimMetrics sim_metrics;
         metrics_read(&metrics_board, &sim_metrics);
 
+        // WH_METRICS_STDOUT=1: ~1x/sec headless dump of the HUD's real-time
+        // numbers, for verification when the physical display isn't
+        // reachable (e.g. checking sim jitter/overruns over ssh while a
+        // concurrent CPU load like the hand tracker is running).
+        static bool metrics_stdout_checked = false, metrics_stdout_on = false;
+        static uint64_t metrics_stdout_last_ns = 0;
+        if (!metrics_stdout_checked) {
+            metrics_stdout_on = getenv("WH_METRICS_STDOUT") != NULL;
+            metrics_stdout_checked = true;
+        }
+        if (metrics_stdout_on && (frame_start - metrics_stdout_last_ns) >= 1000000000ull) {
+            printf("metrics: tick=%llu jit_last=%lluus jit_mean=%.0fus jit_max=%lluus ovr=%llu exec=%lluus\n",
+                    (unsigned long long)sim_metrics.tick,
+                    (unsigned long long)(sim_metrics.jitter_last_ns / 1000),
+                    sim_metrics.jitter_mean_ns / 1000.0,
+                    (unsigned long long)(sim_metrics.jitter_max_ns / 1000),
+                    (unsigned long long)sim_metrics.overrun_count,
+                    (unsigned long long)(sim_metrics.exec_last_ns / 1000));
+            fflush(stdout);
+            metrics_stdout_last_ns = frame_start;
+        }
+
         const SimSnapshot* snap = snapshot_acquire_read(&snapshot_buf);
 
         glClear(GL_COLOR_BUFFER_BIT);
@@ -302,6 +343,8 @@ int main(int argc, char** argv) {
         size_t bytes = replay_record_save(recorder, REPLAY_PATH);
         if (bytes) printf("replay: saved in-progress recording to %s (%zu bytes)\n", REPLAY_PATH, bytes);
     }
+
+    if (ht.fd >= 0) ht_shutdown(&ht);
 
     free(recorder);
     free(player);

@@ -133,11 +133,30 @@ static void step_aim(Sim* sim) {
     aim_q_to_vector(sim->aim_q, &sim->aim_dx, &sim->aim_dy);
 }
 
+// Clamps (x,y) into [min_x,max_x]x[min_y,max_y]; returns true if it was
+// already inside (no move needed).
+static bool clamp_to_rect(float* x, float* y,
+                           float min_x, float max_x, float min_y, float max_y) {
+    bool inside = *x >= min_x && *x <= max_x && *y >= min_y && *y <= max_y;
+    if (*x < min_x) *x = min_x;
+    if (*x > max_x) *x = max_x;
+    if (*y < min_y) *y = min_y;
+    if (*y > max_y) *y = max_y;
+    return inside;
+}
+
 // Returns true if the confinement clamp had to move the player this tick —
 // i.e. an edge's true position reached where the player actually was. That
 // IS the crush condition (PRD §8.1): the same mechanism that keeps the
 // player "clamped inside the animated rect" is what detects the edge
 // catching up to a player who didn't move away in time.
+//
+// Confinement is to the UNION of the playfield rect and the boss window
+// (when one exists): the two windows merge into one playable space wherever
+// they overlap, so the player can walk through the overlap into the boss's
+// room. Standing in the boss's room when its window jumps away (teleport —
+// telegraphed for 2 s) leaves the player outside both rects, which lands
+// here as a crush: fair, because the ghost outline warned them.
 static bool step_player(Sim* sim) {
     uint32_t keys = sim->input.keys;
     float dx = 0.0f, dy = 0.0f;
@@ -158,20 +177,34 @@ static bool step_player(Sim* sim) {
         sim->player_y += dy * speed * SIM_DT;
     }
 
-    float min_x = sim->edges[EDGE_LEFT].pos + PLAYER_HITBOX_R;
-    float max_x = sim->edges[EDGE_RIGHT].pos - PLAYER_HITBOX_R;
-    float min_y = sim->edges[EDGE_TOP].pos + PLAYER_HITBOX_R;
-    float max_y = sim->edges[EDGE_BOTTOM].pos - PLAYER_HITBOX_R;
+    float ax = sim->player_x, ay = sim->player_y;
+    bool in_a = clamp_to_rect(&ax, &ay,
+                               sim->edges[EDGE_LEFT].pos + PLAYER_HITBOX_R,
+                               sim->edges[EDGE_RIGHT].pos - PLAYER_HITBOX_R,
+                               sim->edges[EDGE_TOP].pos + PLAYER_HITBOX_R,
+                               sim->edges[EDGE_BOTTOM].pos - PLAYER_HITBOX_R);
 
-    bool crushed = sim->player_x < min_x || sim->player_x > max_x ||
-                   sim->player_y < min_y || sim->player_y > max_y;
+    if (!in_a && sim->boss_win_active) {
+        float bx = sim->player_x, by = sim->player_y;
+        bool in_b = clamp_to_rect(&bx, &by,
+                                   sim->boss_win_x + PLAYER_HITBOX_R,
+                                   sim->boss_win_x + BOSS_WINDOW_W - PLAYER_HITBOX_R,
+                                   sim->boss_win_y + PLAYER_HITBOX_R,
+                                   sim->boss_win_y + BOSS_WINDOW_H - PLAYER_HITBOX_R);
+        if (in_b) return false;  // inside the boss's room: no clamp, no crush
 
-    if (sim->player_x < min_x) sim->player_x = min_x;
-    if (sim->player_x > max_x) sim->player_x = max_x;
-    if (sim->player_y < min_y) sim->player_y = min_y;
-    if (sim->player_y > max_y) sim->player_y = max_y;
+        // Outside both: crush. Land the player at whichever room's clamp
+        // point is nearer to where they actually were.
+        float da = (ax - sim->player_x) * (ax - sim->player_x) + (ay - sim->player_y) * (ay - sim->player_y);
+        float db = (bx - sim->player_x) * (bx - sim->player_x) + (by - sim->player_y) * (by - sim->player_y);
+        if (db < da) { sim->player_x = bx; sim->player_y = by; }
+        else         { sim->player_x = ax; sim->player_y = ay; }
+        return true;
+    }
 
-    return crushed;
+    sim->player_x = ax;
+    sim->player_y = ay;
+    return !in_a;
 }
 
 static void player_hit(Sim* sim, bool reset_win) {
@@ -315,13 +348,20 @@ static bool enemy_deals_contact_damage(uint8_t type) {
     return type == ENEMY_TRIANGLE || type == ENEMY_CIRCLE;
 }
 
+static bool point_in_boss_window(const Sim* sim, float x, float y);
+
 static bool enemy_is_outside(const Sim* sim, const Enemy* e) {
     // The Spiker plays by different rules: it lives in its own window and its
     // vulnerability is decided by window overlap, not by the player's rect.
     if (e->type == ENEMY_SPIKER) return !sim->boss_vulnerable;
 
-    return e->x < sim->edges[EDGE_LEFT].pos || e->x > sim->edges[EDGE_RIGHT].pos ||
-           e->y < sim->edges[EDGE_TOP].pos  || e->y > sim->edges[EDGE_BOTTOM].pos;
+    // "Inside" means inside the union of both windows: the player can stand
+    // in the boss's room, so an enemy that follows them there must stay live
+    // (vulnerable, bright, dealing contact damage) rather than going dim.
+    bool in_player_win =
+        e->x >= sim->edges[EDGE_LEFT].pos && e->x <= sim->edges[EDGE_RIGHT].pos &&
+        e->y >= sim->edges[EDGE_TOP].pos  && e->y <= sim->edges[EDGE_BOTTOM].pos;
+    return !in_player_win && !point_in_boss_window(sim, e->x, e->y);
 }
 
 // The boss window is a pure function of the boss's position — no separate
@@ -346,6 +386,7 @@ static bool point_in_boss_window(const Sim* sim, float x, float y) {
 static void update_boss_window(Sim* sim) {
     sim->boss_win_active = false;
     sim->boss_vulnerable = false;
+    sim->boss_tp_active = false;
 
     for (uint16_t i = 0; i < sim->enemy_count; i++) {
         const Enemy* e = &sim->enemies[i];
@@ -359,6 +400,14 @@ static void update_boss_window(Sim* sim) {
         sim->boss_vulnerable = rects_overlap(px, py, pw, ph,
                                               sim->boss_win_x, sim->boss_win_y,
                                               BOSS_WINDOW_W, BOSS_WINDOW_H);
+
+        if (e->tp_state == SPIKER_TP_TELEGRAPH) {
+            sim->boss_tp_active = true;
+            sim->boss_tp_x = e->tp_dest_x;
+            sim->boss_tp_y = e->tp_dest_y;
+            sim->boss_tp_progress =
+                1.0f - (float)e->tp_timer_ticks / (float)SPIKER_TP_TELEGRAPH_TICKS;
+        }
         break;  // only ever one Spiker
     }
 }
@@ -506,14 +555,27 @@ static void step_enemy_octagon(Sim* sim, Enemy* e) {
 // Teleports anywhere on screen — it is NOT confined to the player's window.
 // The only constraint is that its own window stays fully on screen. Getting
 // back within reach is the player's problem, solved by pushing walls outward.
-static void spiker_teleport(Sim* sim, Enemy* e) {
+//
+// The blink is telegraphed: the destination is committed here, up front, and
+// published as a ghost outline for the whole telegraph. That's what keeps
+// the merge mechanic fair — a player standing inside the boss's room gets
+// 2 s of warning that the floor is about to leave.
+static void spiker_begin_teleport(Sim* sim, Enemy* e) {
     float half_w = BOSS_WINDOW_W * 0.5f + BOSS_WINDOW_SCREEN_MARGIN;
     float half_h = BOSS_WINDOW_H * 0.5f + BOSS_WINDOW_SCREEN_MARGIN;
     float lo_x = half_w, hi_x = INTERNAL_W - half_w;
     float lo_y = half_h, hi_y = INTERNAL_H - half_h;
 
-    e->x = lo_x + rng_float01(&sim->rng) * (hi_x - lo_x);
-    e->y = lo_y + rng_float01(&sim->rng) * (hi_y - lo_y);
+    e->tp_dest_x = lo_x + rng_float01(&sim->rng) * (hi_x - lo_x);
+    e->tp_dest_y = lo_y + rng_float01(&sim->rng) * (hi_y - lo_y);
+    e->tp_state = SPIKER_TP_TELEGRAPH;
+    e->tp_timer_ticks = SPIKER_TP_TELEGRAPH_TICKS;
+}
+
+static void spiker_finish_teleport(Sim* sim, Enemy* e) {
+    e->x = e->tp_dest_x;
+    e->y = e->tp_dest_y;
+    e->tp_state = SPIKER_TP_NONE;
 
     e->damage_since_blink = 0.0f;
     e->spiker_wave_counter++;   // attacks speed up with each blink
@@ -521,8 +583,6 @@ static void spiker_teleport(Sim* sim, Enemy* e) {
     add_shake(sim, SPIKER_TELEPORT_SHAKE);
 }
 
-// Immobile but teleports. Passive: radial bullet waves on a timer that tightens
-// as its wave counter climbs. Active: a telegraphed laser that then sweeps.
 static void spawn_blaster_volley(Sim* sim) {
     for (int n = 0; n < BLASTER_VOLLEY; n++) {
         Blaster* b = NULL;
@@ -576,6 +636,13 @@ static void step_blasters(Sim* sim) {
 static void step_enemy_spiker(Sim* sim, Enemy* e) {
     // No clamp to the player's window: the boss roams the whole screen and
     // carries its own window with it (see update_boss_window).
+
+    // --- teleport telegraph: count down, then blink to the committed spot ---
+    if (e->tp_state == SPIKER_TP_TELEGRAPH) {
+        if (--e->tp_timer_ticks <= 0) {
+            spiker_finish_teleport(sim, e);
+        }
+    }
 
     // --- blaster volleys: the boss's reach before the windows merge ---
     if (--sim->blaster_timer_ticks <= 0) {
@@ -767,6 +834,9 @@ static void spawn_enemy(Sim* sim, uint8_t type) {
     e->laser_angle = 0.0f;
     e->spiker_wave_counter = 0;
     e->damage_since_blink = 0.0f;
+    e->tp_state = SPIKER_TP_NONE;
+    e->tp_timer_ticks = 0;
+    e->tp_dest_x = e->tp_dest_y = 0.0f;
     e->hit_flash_ticks = 0;
 
     if (type == ENEMY_SPIKER) {
@@ -841,8 +911,9 @@ static void step_collisions(Sim* sim) {
                 e->hit_flash_ticks = ENEMY_HIT_FLASH_TICKS;
                 if (e->type == ENEMY_SPIKER && e->hp > 0.0f) {
                     e->damage_since_blink += PSHOT_DAMAGE;
-                    if (e->damage_since_blink >= SPIKER_TELEPORT_DAMAGE) {
-                        spiker_teleport(sim, e);
+                    if (e->damage_since_blink >= SPIKER_TELEPORT_DAMAGE &&
+                        e->tp_state == SPIKER_TP_NONE) {
+                        spiker_begin_teleport(sim, e);
                     }
                 }
                 consumed = true;
@@ -932,6 +1003,7 @@ static void begin_upgrade_state(Sim* sim) {
     for (int i = 0; i < MAX_BLASTERS; i++) sim->blasters[i].active = false;
     sim->boss_win_active = false;
     sim->boss_vulnerable = false;
+    sim->boss_tp_active = false;
 
     int a = rng_range_i(&sim->rng, 0, UPGRADE_COUNT - 1);
     int b;
@@ -995,6 +1067,7 @@ static void reset_common(Sim* sim) {
     sim->spiker_alive = false;
     sim->boss_win_active = false;
     sim->boss_vulnerable = false;
+    sim->boss_tp_active = false;
     for (int i = 0; i < MAX_BLASTERS; i++) sim->blasters[i].active = false;
     sim->blaster_timer_ticks = BLASTER_INTERVAL_TICKS;
     sim->spawn_queue_count = 0;
@@ -1246,6 +1319,11 @@ void sim_publish(const Sim* sim, SnapshotBuffer* sb) {
     snap->boss_win_h = BOSS_WINDOW_H;
     snap->boss_win_active = sim->boss_win_active ? 1u : 0u;
     snap->boss_vulnerable = sim->boss_vulnerable ? 1u : 0u;
+
+    snap->boss_tp_active = sim->boss_tp_active ? 1u : 0u;
+    snap->boss_tp_x = sim->boss_tp_x;
+    snap->boss_tp_y = sim->boss_tp_y;
+    snap->boss_tp_progress = sim->boss_tp_progress;
 
     snap->player.x = sim->player_x;
     snap->player.y = sim->player_y;

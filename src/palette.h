@@ -25,4 +25,10 @@ static const RGBA PALETTE_HUD_TEXT      = { 0.486275f, 1.000000f, 0.690196f, 1.0
 // fixed value.
 #define PALETTE_OUTSIDE_TINT 0.30f
 
+// The boss never stands in the void — its "outside" flag means "windows not
+// merged", and it's sitting inside its own lit room. The full void treatment
+// (0.30 + desaturate) reads as dead/broken there, so it gets a gentler cue:
+// still clearly pink, just cooled off until the rooms merge.
+#define PALETTE_BOSS_UNMERGED_TINT 0.55f
+
 #endif // PALETTE_H

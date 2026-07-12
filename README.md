@@ -13,9 +13,9 @@ QNX engineers judging it.
 *Status: M0–M3 complete (M3 — Pi first contact — verified on real Raspberry
 Pi 5 hardware). M4/M5 content (enemies, waves, upgrades, Spiker boss, replay)
 is also built and verified. Co-op multiplayer (see below) is built and
-verified on the dev box — two-Pi direct-cable bring-up hasn't started yet
-(hardware is offline); see `BRINGUP_LOG.md` for full milestone history and
-live bring-up notes.*
+verified live on two Pi 5s over a direct ethernet link. Hand-tracking control
+(see below) is verified live over WiFi. See `BRINGUP_LOG.md` for full
+milestone history and live bring-up notes.*
 
 ## Architecture
 
@@ -106,17 +106,42 @@ packets — the peer compares it against its own hash for that same tick, and
 the in-game HUD's `NET HOST/JOIN D4 STALL n SYNC OK` line reports the result
 live (see `src/netplay.h` for the full protocol comment).
 
-**Verified so far (dev box only — see BRINGUP_LOG.md):** `make mp-check`
-(the multiplayer analogue of `replaycheck`, over real loopback UDP, nothing
-mocked) passes with 0 stalls and matching hashes; two live processes on
-loopback reach a synchronized game with pixel-identical enemy positions on
-both screens; killing one side correctly flips the other's HUD to
-`PEER LOST` within 2 s. **Not yet done:** running any of this on the actual
-two-Pi direct ethernet link — that bring-up hasn't started (hardware is
-offline). `--mp-host` / `--mp-join <ip>` / `--mp-port <port>` pre-fill the
-front end for scripted launches (`deploy.sh`); interactive play never needs
-them. F2/F3 (replay record/playback) are single-player only — the on-disk
-format is one input stream, not two.
+**Verified on real hardware:** two Raspberry Pi 5s, QNX 8.0, connected by a
+direct ethernet cable (`cgem0`, auto-assigned IPv4 link-local addresses,
+~0.15 ms RTT). A full co-op session — WAITING ROOM sync, CHOOSE YOUR SHIP,
+a full run played to completion — ran with **0 stalls, 0 overruns on both
+sides**, jitter in the same ~500–600 µs range as single-player on the same
+hardware. Also verified: `make mp-check` (the multiplayer analogue of
+`replaycheck`, over real loopback UDP, nothing mocked) passes with 0 stalls
+and matching hashes; killing one side correctly flips the other's HUD to
+`PEER LOST` within 2 s. Two real bugs were found and fixed during this
+bring-up (input-delay bootstrap gap, QNX key-repeat flooding UI navigation)
+— see BRINGUP_LOG.md. `--mp-host` / `--mp-join <ip>` / `--mp-port <port>`
+pre-fill the front end for scripted launches (`deploy.sh`); interactive play
+never needs them. F2/F3 (replay record/playback) are single-player only —
+the on-disk format is one input stream, not two.
+
+## Hand-tracking control
+
+`src/handtrack.h`/`src/handtrack.c` is a generic UDP receiver (`--handtrack
+[port]` / `WH_HANDTRACK=1`, default port 47800) that folds hand-derived
+movement/aim/shoot into the same input path as keyboard/mouse — a dead or
+absent tracker just leaves the game keyboard-only, no special handling
+needed anywhere else. It was built and verified independent of any real
+camera (a synthetic fake sender lives at `tools/handtrack_fake_sender.py`).
+
+[`qnx-handtrack-collab/`](qnx-handtrack-collab/) is a teammate's
+(tan-pixel's) companion project — a MediaPipe two-hand webcam tracker that
+sends this exact `HtPacket` protocol — vendored into this repo for the
+Devpost submission (original:
+[tan-pixel/qnx-handtrack-collab](https://github.com/tan-pixel/qnx-handtrack-collab)).
+Its `bullethell-cv-prototype/joystick_controller.py` runs on any laptop with
+a webcam (standard `opencv-python`/`mediapipe`, no QNX build required) and
+was verified live against a Pi over WiFi: left hand → movement, right hand →
+aim, right fist → shoot, all decoding correctly with no protocol changes on
+either side. The repo's own native on-Pi camera path (`docs/PI_DEPLOYMENT.md`)
+is a separate, unfinished effort blocked on MediaPipe's QNX aarch64 Bazel
+cross-compile — not needed for the webcam-over-WiFi path above.
 
 ## Controls
 
@@ -151,9 +176,9 @@ TARGET_IP=<pi-ip> ./deploy.sh   # ssh/scp as qnxuser, no root; see BRINGUP_LOG.m
 
 `make qnx-x86` builds for the QNX x86_64 VM (bring-up smoke test before Pi
 access). `make all` builds both Linux and QNX targets so cross-compile
-breakage is caught immediately. Both QNX targets currently cross-compile
-clean (`-Wall -Wextra`, zero warnings) but haven't been *run* on target since
-the co-op work landed — no Pi access right now (see BRINGUP_LOG.md).
+breakage is caught immediately. Both single-player and co-op multiplayer are
+verified running live on real Pi 5 hardware (see Multiplayer above and
+BRINGUP_LOG.md).
 
 `make mp-check` runs the multiplayer determinism CI (real loopback UDP, see
 Multiplayer above) — the co-op analogue of `make replaycheck`.
@@ -169,6 +194,9 @@ Multiplayer above) — the co-op analogue of `make replaycheck`.
   Shop, and the Spiker boss carries its own window that merges with yours on
   contact (reaching it by pushing your walls outward is the fight).
 - 8×8 bitmap font: public domain (`tools/font8x8.h`).
+- Hand-tracking sender (`qnx-handtrack-collab/`): **tan-pixel**, vendored
+  from [tan-pixel/qnx-handtrack-collab](https://github.com/tan-pixel/qnx-handtrack-collab)
+  for this submission — see Hand-tracking control above.
 
 See `BRINGUP_LOG.md` for QNX/Pi bring-up notes and `PRD.md` for the full spec
 this was built against.

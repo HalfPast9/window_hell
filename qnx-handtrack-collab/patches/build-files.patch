@@ -1,0 +1,116 @@
+diff --git a/ports/opencv/qnx.nto.toolchain.cmake b/ports/opencv/qnx.nto.toolchain.cmake
+index 54f6afb..db2764f 100644
+--- a/ports/opencv/qnx.nto.toolchain.cmake
++++ b/ports/opencv/qnx.nto.toolchain.cmake
+@@ -27,8 +27,12 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${EXTRA_CMAKE_LINKER
+ 
+ set(CMAKE_CXX_STANDARD 17)
+ 
+-# Python setup
+-if(EXISTS ${QNX_TARGET}/usr/include/python3.11)
++# Python setup — detect version shipped with SDP (3.11 on older SDP, 3.13 on SDP 8.0.3+)
++if(EXISTS ${QNX_TARGET}/usr/include/python3.13)
++    set(PYTHON_VERSION_QNX 3.13)
++    set(PYTHON_VERSION_QNX_ABI 313)
++    set(OPENCV_PYTHON3_VERSION 3.13)
++elseif(EXISTS ${QNX_TARGET}/usr/include/python3.11)
+     set(PYTHON_VERSION_QNX 3.11)
+     set(PYTHON_VERSION_QNX_ABI 311)
+     set(OPENCV_PYTHON3_VERSION 3.11)
+@@ -38,16 +42,16 @@ else()
+     set(OPENCV_PYTHON3_VERSION 3.8)
+ endif()
+ 
+-set(PYTHON3_CVPY_SUFFIX .cpython-311.so)
+-set(PYTHON_INCLUDE_DIR ${QNX_TARGET}/usr/include/${CPUVARDIR}/python3.11;${QNX_TARGET}/${CPUVARDIR}/usr/include/python3.11;${QNX_TARGET}/usr/include/python3.11;${QNX_TARGET}/${CPUVARDIR}/usr/lib/python3.11/site-packages/numpy/core/include;${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python3.11/site-packages/numpy/core/include)
++set(PYTHON3_CVPY_SUFFIX .cpython-${PYTHON_VERSION_QNX_ABI}.so)
++set(PYTHON_INCLUDE_DIR ${QNX_TARGET}/usr/include/${CPUVARDIR}/python${PYTHON_VERSION_QNX};${QNX_TARGET}/${CPUVARDIR}/usr/include/python${PYTHON_VERSION_QNX};${QNX_TARGET}/usr/include/python${PYTHON_VERSION_QNX};${QNX_TARGET}/${CPUVARDIR}/usr/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/_core/include;${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/_core/include;${QNX_TARGET}/${CPUVARDIR}/usr/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/core/include;${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/core/include)
+ set(PYTHON3_INCLUDE_PATH ${PYTHON_INCLUDE_DIR})
+-set(PYTHON3_LIBRARY ${QNX_TARGET}/${CPUVARDIR}/usr/lib/libpython3.11.so)
++set(PYTHON3_LIBRARY ${QNX_TARGET}/${CPUVARDIR}/usr/lib/libpython${PYTHON_VERSION_QNX}.so)
+ set(PYTHON3_LIBRARIES ${PYTHON3_LIBRARY})
+-set(PYTHON3_PACKAGES_PATH ${QNX_TARGET}/${CPUVARDIR}/usr/lib/python3.11/site-packages)
+-set(PYTHON3_NUMPY_INCLUDE_DIRS ${QNX_TARGET}/${CPUVARDIR}/usr/lib/python3.11/site-packages/numpy/core/include;${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python3.11/site-packages/numpy/core/include)
++set(PYTHON3_PACKAGES_PATH ${QNX_TARGET}/${CPUVARDIR}/usr/lib/python${PYTHON_VERSION_QNX}/site-packages)
++set(PYTHON3_NUMPY_INCLUDE_DIRS ${QNX_TARGET}/${CPUVARDIR}/usr/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/_core/include;${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/_core/include;${QNX_TARGET}/${CPUVARDIR}/usr/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/core/include;${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python${PYTHON_VERSION_QNX}/site-packages/numpy/core/include)
+ set(PYTHONLIBS_FOUND)
+ set(PYTHON_IS_DEBUG FALSE)
+-set(OPENCV_PYTHON_INSTALL_PATH ${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python3.11/site-packages)
++set(OPENCV_PYTHON_INSTALL_PATH ${QNX_TARGET}/${CPUVARDIR}/usr/local/lib/python${PYTHON_VERSION_QNX}/site-packages)
+ 
+ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+diff --git a/ports/tensorflow/common.mk b/ports/tensorflow/common.mk
+index 0a23749..aec7792 100644
+--- a/ports/tensorflow/common.mk
++++ b/ports/tensorflow/common.mk
+@@ -26,8 +26,18 @@ CMAKE_BUILD_TYPE ?= Release
+ ALL_DEPENDENCIES = tflite_all
+ .PHONY: tflite_all
+ 
+-PYBIND11_INCLUDE = $(shell python3 -c "import pybind11; print (pybind11.get_include())")
+-NUMPY_INCLUDE = $(INSTALL_ROOT)/$(CPUVARDIR)/$(PREFIX)/lib/python3.11/site-packages/numpy/core/include
++ifeq ($(wildcard $(QNX_TARGET)/usr/include/python3.13),)
++ifeq ($(wildcard $(QNX_TARGET)/usr/include/python3.11),)
++PYTHON_VERSION_QNX = 3.8
++PYTHON_VERSION_QNX_ABI = 38
++else
++PYTHON_VERSION_QNX = 3.11
++PYTHON_VERSION_QNX_ABI = 311
++endif
++else
++PYTHON_VERSION_QNX = 3.13
++PYTHON_VERSION_QNX_ABI = 313
++endif
+ 
+ ifeq ($(strip $(notdir $(QNX_TARGET))),qnx7)
+ TFLITE_ENABLE_XNNPACK = OFF
+@@ -37,9 +47,27 @@ endif
+ 
+ FLAGS += -D_QNX_SOURCE -funsafe-math-optimizations -DFARMHASH_LITTLE_ENDIAN -D__LITTLE_ENDIAN__
+ 
++MAKE_ARGS ?= -j $(firstword $(JLEVEL) 1)
++
++
++include $(MKFILES_ROOT)/qtargets.mk
++
++PYBIND11_INCLUDE = $(shell python3 -c "import pybind11; print (pybind11.get_include())")
++
++# numpy 2.x headers live under numpy/_core/include; numpy 1.x uses numpy/core/include
++NUMPY_SITE_PACKAGES = $(firstword $(wildcard \
++	$(INSTALL_ROOT)/$(CPUVARDIR)/$(PREFIX)/lib/python$(PYTHON_VERSION_QNX)/site-packages \
++	$(QNX_TARGET)/$(CPUVARDIR)/$(PREFIX)/lib/python$(PYTHON_VERSION_QNX)/site-packages))
++NUMPY_INCLUDE = $(firstword $(wildcard \
++	$(NUMPY_SITE_PACKAGES)/numpy/_core/include \
++	$(NUMPY_SITE_PACKAGES)/numpy/core/include))
++ifeq ($(NUMPY_INCLUDE),)
++$(error Could not find numpy headers under $(NUMPY_SITE_PACKAGES)/numpy; build numpy first)
++endif
++
+ EXT_FLAGS = -I$(PYBIND11_INCLUDE) \
+             -I$(NUMPY_INCLUDE) \
+-            -I"$(QNX_TARGET)/usr/include:$(QNX_TARGET)/usr/include/python3.11:$(QNX_TARGET)/$(CPUVARDIR)/usr/include:$(QNX_TARGET)/$(CPUVARDIR)/usr/include/python3.11:$(QNX_TARGET)/usr/include/$(CPUVARDIR)/python3.11" \
++            -I"$(QNX_TARGET)/usr/include:$(QNX_TARGET)/usr/include/python$(PYTHON_VERSION_QNX):$(QNX_TARGET)/$(CPUVARDIR)/usr/include:$(QNX_TARGET)/$(CPUVARDIR)/usr/include/python$(PYTHON_VERSION_QNX):$(QNX_TARGET)/usr/include/$(CPUVARDIR)/python$(PYTHON_VERSION_QNX)" \
+             -L"$(QNX_TARGET)/$(CPUVARDIR)/lib:$(QNX_TARGET)/$(CPUVARDIR)/usr/lib"
+ 
+ CMAKE_ARGS = -DCMAKE_TOOLCHAIN_FILE=$(PROJECT_ROOT)/qnx.nto.toolchain.cmake \
+@@ -73,18 +101,13 @@ CMAKE_ARGS = -DCMAKE_TOOLCHAIN_FILE=$(PROJECT_ROOT)/qnx.nto.toolchain.cmake \
+              -DOVERRIDABLE_FETCH_CONTENT_google_benchmark_GIT_REPOSITORY=https://github.com/qnx-ports/benchmark.git \
+              -DOVERRIDABLE_FETCH_CONTENT_google_benchmark_GIT_TAG=qnx_v1.8.3 \
+ 
+-MAKE_ARGS ?= -j $(firstword $(JLEVEL) 1)
+-
+-
+-include $(MKFILES_ROOT)/qtargets.mk
+-
+ ifndef NO_TARGET_OVERRIDE
+ tflite_all:
+ 	@mkdir -p build
+ 	cd build && cmake $(CMAKE_ARGS) $(QNX_PROJECT_ROOT)/tensorflow/lite/
+ 	cd build && make all _pywrap_tensorflow_interpreter_wrapper $(MAKE_ARGS)
+ 	BUILD_DIR=$(PWD)/build/python_loader CMAKE_BUILD_DIR=$(PWD)/build $(QNX_PROJECT_ROOT)/tensorflow/lite/tools/pip_package/build_pip_package_with_cmake.sh nto
+-	mkdir -p $(INSTALL_ROOT)/$(CPUVARDIR)/$(PREFIX)/lib/python3.11/site-packages && cp -r $(PWD)/build/python_loader/tflite_runtime $(PWD)/build/python_loader/tflite_runtime.egg-info $(INSTALL_ROOT)/$(CPUVARDIR)/$(PREFIX)/lib/python3.11/site-packages;\
++	mkdir -p $(INSTALL_ROOT)/$(CPUVARDIR)/$(PREFIX)/lib/python$(PYTHON_VERSION_QNX)/site-packages && cp -r $(PWD)/build/python_loader/tflite_runtime $(PWD)/build/python_loader/tflite_runtime.egg-info $(INSTALL_ROOT)/$(CPUVARDIR)/$(PREFIX)/lib/python$(PYTHON_VERSION_QNX)/site-packages;\
+ 
+ install check: tflite_all
+ 	cd build && make install $(MAKE_ARGS)

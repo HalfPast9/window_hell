@@ -1,0 +1,58 @@
+diff --git a/bazel/glog.bzl b/bazel/glog.bzl
+index 1111111..2222222 100644
+--- a/bazel/glog.bzl
++++ b/bazel/glog.bzl
+@@ -50,6 +50,11 @@ def glog_library(namespace = "google", with_gflags = 1, **kwargs):
+         values = {"compiler": "clang-cl"},
+     )
+ 
++    native.config_setting(
++        name = "qnx",
++        constraint_values = ["@platforms//os:qnx"],
++    )
++
+     common_copts = [
+         "-DGLOG_BAZEL_BUILD",
+         # Inject a C++ namespace.
+@@ -188,7 +193,8 @@ def glog_library(namespace = "google", with_gflags = 1, **kwargs):
+         }),
+         copts =
+             select({
+-                "//conditions:default": common_copts + qnx_copts,
++                ":qnx": common_copts + qnx_copts,
++                "//conditions:default": common_copts + linux_or_darwin_copts,
+             }) +
+             select({
+                 ":clang-cl": clang_cl_only_copts,
+diff --git a/src/utilities.cc b/src/utilities.cc
+index 3333333..4444444 100644
+--- a/src/utilities.cc
++++ b/src/utilities.cc
+@@ -48,6 +48,9 @@
+ #ifdef HAVE_UNISTD_H
+ # include <unistd.h>  // For geteuid.
+ #endif
++#ifdef _QNX_SOURCE
++# include <sys/process.h>  // For gettid().
++#endif
+ #ifdef HAVE_PWD_H
+ # include <pwd.h>
+ #endif
+@@ -257,6 +260,9 @@ bool PidHasChanged() {
+ }
+ 
+ pid_t GetTID() {
++#if defined(_QNX_SOURCE)
++  return gettid();
++#else
+   // On Linux and MacOSX, we try to use gettid().
+ #if defined GLOG_OS_LINUX || defined GLOG_OS_MACOSX
+ #ifndef __NR_gettid
+@@ -299,6 +305,7 @@ pid_t GetTID() {
+ #else
+   return -1;
+ #endif
++#endif  // !_QNX_SOURCE
+ }
+ 
+ const char* const_basename(const char* filepath) {

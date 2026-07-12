@@ -1,0 +1,39 @@
+# QNX SDP — never commit
+.qnx/
+qnx800/
+
+# Build artifacts
+bazel-*
+*.o
+*.so
+*.a
+build/
+nto-aarch64-le/
+nto-x86_64-o/
+flatc-native-build/
+env/
+.cache/
+
+# Secrets
+*.env
+.env.*
+*credentials*
+*.pem
+*.key
+license*
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Large model files (download separately)
+*.task
+hand_landmarker.task

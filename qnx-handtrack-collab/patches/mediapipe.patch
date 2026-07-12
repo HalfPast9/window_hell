@@ -1,0 +1,73 @@
+diff --git a/.bazelrc b/.bazelrc
+index 285a30579..d2cee19e1 100644
+--- a/.bazelrc
++++ b/.bazelrc
+@@ -16,6 +16,7 @@ build:linux --cxxopt=-std=c++17
+ build:linux --host_cxxopt=-std=c++17
+ build:linux --copt=-w
+ build:linux --define=xnn_enable_avx512amx=false
++build:linux --define=xnn_enable_avxvnniint8=false
+ 
+ # windows
+ build:windows --cxxopt=/std:c++17
+@@ -111,6 +112,7 @@ build --copt="-DEIGEN_DONT_VECTORIZE=1"
+ build --copt="-DFARMHASH_LITTLE_ENDIAN=1"
+ build --copt="-Wno-c++11-narrowing"
+ build --copt="-Wno-invalid-specialization"
++build --define=xnn_enable_avxvnniint8=false
+ build --linkopt="-lz"
+ build --subcommands
+ build --verbose_failures
+diff --git a/WORKSPACE b/WORKSPACE
+index adeef8ea4..f64431a50 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -131,6 +131,12 @@ http_archive(
+ # 2020-08-21
+ http_archive(
+     name = "com_github_glog_glog",
++    patch_args = [
++        "-p1",
++    ],
++    patches = [
++        "@//third_party:com_github_glog_glog_qnx_fix.diff",
++    ],
+     sha256 = "6f4727dcf44bc587928da630d0ac2588b11b334c035e31f726af88ea304f6aea",
+     strip_prefix = "glog-f4189856420b56a52b64c2d871f3b1993e77ec7d",
+     urls = [
+@@ -146,6 +152,7 @@ http_archive(
+     ],
+     patches = [
+         "@//third_party:com_github_glog_glog.diff",
++        "@//third_party:com_github_glog_glog_qnx_fix.diff",
+     ],
+     sha256 = "6f4727dcf44bc587928da630d0ac2588b11b334c035e31f726af88ea304f6aea",
+     strip_prefix = "glog-f4189856420b56a52b64c2d871f3b1993e77ec7d",
+diff --git a/build_qnx_examples.sh b/build_qnx_examples.sh
+index 3e4e9b72a..12515458d 100755
+--- a/build_qnx_examples.sh
++++ b/build_qnx_examples.sh
+@@ -243,14 +243,15 @@ EOF
+ workspace(name = "python_qnx")
+ EOF
+ 
+-    ln -s /usr/bin $python_qnx_toolchain/bin
+-    mkdir $python_qnx_toolchain/include
+-    ln -s /usr/include/python3.14 $python_qnx_toolchain/include/python3.14
+-    mkdir $python_qnx_toolchain/lib
+-    ln -s /usr/lib/python3.14 $python_qnx_toolchain/lib/python3.14
+-    ln -s /usr/lib/libpython3.so $python_qnx_toolchain/lib/libpython3.so
+-    ln -s /usr/lib/libpython3.14.so $python_qnx_toolchain/lib/libpython3.14.so
+-    ln -s $python_qnx_toolchain/bin/python3 $python_qnx_toolchain/python
++    mkdir -p "$python_qnx_toolchain/bin"
++    ln -sf /usr/bin/python3.14 "$python_qnx_toolchain/bin/python3"
++    mkdir "$python_qnx_toolchain/include"
++    ln -s /usr/include/python3.14 "$python_qnx_toolchain/include/python3.14"
++    mkdir "$python_qnx_toolchain/lib"
++    ln -s /usr/lib/python3.14 "$python_qnx_toolchain/lib/python3.14"
++    ln -s /usr/lib/libpython3.so "$python_qnx_toolchain/lib/libpython3.so"
++    ln -s /usr/lib/libpython3.14.so "$python_qnx_toolchain/lib/libpython3.14.so"
++    ln -sf "$python_qnx_toolchain/bin/python3" "$python_qnx_toolchain/python"
+ fi
+ 
+ if [[ ! -d "$cpp_qnx_toolchain" ]]; then

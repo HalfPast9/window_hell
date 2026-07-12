@@ -1,4 +1,4 @@
-.PHONY: all linux qnx qnx-x86 deploy replaycheck balance-probe clean
+.PHONY: all linux qnx qnx-x86 native deploy replaycheck balance-probe clean
 
 SRC_COMMON := src/main.c src/sim.c src/metrics.c src/render.c src/hud.c src/replay.c src/handtrack.c
 
@@ -42,6 +42,21 @@ ifeq ($(QNX_HOST),)
 	$(error QNX_HOST is not set. Run: source $$QNX_SDP_INSTALL_DIR/qnxsdp-env.sh)
 endif
 	$(QNXX86_CC) $(QNX_CFLAGS) -o $(QNXX86_BIN) $(QNX_SRC) $(QNX_LIBS)
+
+# --- QNX native build (run ON the self-hosted developer desktop itself,
+# e.g. the Pi) — no cross toolchain, no qcc, no Windows SDP involved. Uses the
+# box's own gcc/clang against on-device headers, which are NOT installed by
+# default: `sudo apk add qnx-screen-dev gles-headers egl-headers qnx-khr-dev`.
+# Source has to physically be on the machine (git clone or scp) since this is
+# a local build, not a target/host split.
+NATIVE_CC     := gcc
+NATIVE_CFLAGS := -std=c11 -O2 -Wall -Wextra
+NATIVE_LIBS   := -lscreen -lEGL -lGLESv2 -lm -lsocket
+NATIVE_SRC    := $(SRC_COMMON) src/platform_qnx.c
+NATIVE_BIN    := $(BIN_DIR)/windowed-hell-qnx-native
+
+native: | $(BIN_DIR)
+	$(NATIVE_CC) $(NATIVE_CFLAGS) -o $(NATIVE_BIN) $(NATIVE_SRC) $(NATIVE_LIBS)
 
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
